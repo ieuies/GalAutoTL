@@ -35,6 +35,24 @@ py -3 -m pytest tests -q
 
 用例分三层：行为回归、假 AI 质量门禁、迷你 e2e。
 
+## 引擎能力卡
+
+| 引擎 | 管线 | 一键程度 | 编码 | 二次全量 | 仅译漏句 | 主要限制 |
+|------|------|----------|------|----------|----------|----------|
+| Kirikiri / XP3 | `kirikiri` | 高 | UTF-16 | 原包/备份+缓存 | ✓ | cxdec 需 garbro / unencrypted |
+| SoftPal | `softpal` | 高 | zh→GBK | PAC/备份+缓存 | ✓ | 非经典 SoftPal 另论 |
+| Kagura | `kagura` | 高 | CP932 | 备份 pak | ✓ | 槽位截断 / `・` |
+| Artemis | `artemis` | 高 | UTF-8 | PFS 日文源 | ✓ | `.asb` 弱 |
+| LCSE / Liquid | `lcse` | 高 | GBK | 备份封包 | ✓ | 用中文 bat，勿日语 LE |
+| BGI / Ethornell | `bgi` | 中高 | CP932 | 备份 arc | ✓ | 可能需回封 arc |
+| YU-RIS | `yuris` | 中高 | GBK 写 | 备份 YPF | ✓ | 显示乱码需引擎补丁 |
+| SakanaGL | `sakana` | 中高 | UTF-8 | 备份 sx | ✓ | 过长句塞不回槽 |
+| Unity | `unity` | 中高 | UTF-8 词典 | 词典合并 | ✓ | 依赖 BepInEx/XUA |
+| RealLive | `reallive` | 中 | UTF-8 导出 | 跳过已有场景+补翻 | ✓ | 需 export_utf8 / 外置工具 |
+| 通用文本 | `generic` | 中 | 可调 | 视目录 | ✓ | 先解包明文 |
+
+**按钮怎么用：** 首次用「开始汉化」→ 漏句看 `GalAutoTL_remain.txt` →「仅译漏句」；手改用 `GalAutoTL_review.txt`。不要清 `%APPDATA%\GalAutoTL\cache.sqlite` 后再全量，除非刻意重译。
+
 打包 EXE（已打入 UnityPy）：
 
 ```bat

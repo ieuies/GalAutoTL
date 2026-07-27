@@ -11,7 +11,12 @@ from typing import Callable, List, Optional
 from app.config import AppConfig, cache_db_path
 from app.core.api_client import OpenAICompatClient
 from app.core.cp932_safe import to_cp932_safe
-from app.core.pipeline_harden import remain_filter_set, write_remainder_report
+from app.core.pipeline_harden import (
+    looks_already_chinese,
+    looks_untranslated,
+    remain_filter_set,
+    write_remainder_report,
+)
 from app.core.translate import TranslateCache, translate_batch
 from app.pipelines.generic_text import backup_file
 
@@ -85,10 +90,26 @@ def _collect_utf_lines(path: Path) -> tuple[list[str], list[tuple[int, str, str]
         # skip pure voice tags
         if re.match(r"^\\[a-zA-Z]", body) and not body.startswith("\\{"):
             continue
-        # only lines that still contain kana (remain Japanese)
-        if JP_HINT.search(body):
+        if looks_already_chinese(body):
+            continue
+        if _is_ellipsis_only(body):
+            continue
+        # kana JP or kanji-only UI (確認/設定) still worth translating
+        if JP_HINT.search(body) or looks_untranslated(body):
             pending.append((i, prefix, body))
     return lines, pending
+
+
+def _read_utf_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8-sig").splitlines()
+    except UnicodeDecodeError:
+        return path.read_text(encoding="cp932", errors="replace").splitlines()
+
+
+def _utf_body(line: str) -> Optional[str]:
+    m = LINE_RE.match(line)
+    return m.group(2) if m else None
 
 
 def translate_utf_tree(
@@ -108,7 +129,7 @@ def translate_utf_tree(
     file_needs: list[int] = []
     for path in files:
         _lines, pending = _collect_utf_lines(path)
-        file_needs.append(sum(1 for _i, _p, b in pending if JP_HINT.search(b)))
+        file_needs.append(len(pending))
     grand_total = max(sum(file_needs), 1)
     if log:
         log(f"共 {len(files)} 个场景，约 {grand_total} 条待译台词")
@@ -123,9 +144,10 @@ def translate_utf_tree(
                 break
             out = cn_dir / path.name
             need_n = file_needs[fi - 1]
+            rfilt = remain_filter_set(cfg)
 
-            # Resume: already written CN for this scene
-            if out.is_file() and out.stat().st_size > 0:
+            # Resume: skip finished scenes — but 仅译漏句 must merge into existing CN
+            if out.is_file() and out.stat().st_size > 0 and rfilt is None:
                 if log:
                     log(f"[{fi}/{len(files)}] 跳过已有 {path.name}")
                 done_lines += need_n
@@ -136,8 +158,65 @@ def translate_utf_tree(
 
             if log:
                 log(f"[{fi}/{len(files)}] {path.name}（本场景 {need_n} 条，总进度 {done_lines}/{grand_total}）")
+
+            if rfilt is not None:
+                # Patch allow-list lines into existing CN (or JP copy)
+                if not out.is_file() or out.stat().st_size == 0:
+                    shutil.copy2(path, out)
+                cn_lines = _read_utf_lines(out)
+                jp_lines = _read_utf_lines(path)
+                need: list[tuple[int, str, str]] = []
+                n = min(len(jp_lines), len(cn_lines))
+                for i in range(n):
+                    jm = LINE_RE.match(jp_lines[i])
+                    cm = LINE_RE.match(cn_lines[i])
+                    if not jm or not cm:
+                        continue
+                    jbody = jm.group(2)
+                    if jbody in rfilt:
+                        need.append((i, jm.group(1), jbody))
+                if not need:
+                    file_count += 1
+                    if progress:
+                        progress(done_lines, grand_total)
+                    continue
+                if log:
+                    log(f"仅译漏句: 本文件保留 {len(need)} 条（写入已有 CN）")
+                bodies = [b for _, _, b in need]
+
+                def _file_progress(d: int, _t: int, base: int = done_lines) -> None:
+                    if progress:
+                        progress(min(base + d, grand_total), grand_total)
+
+                translated = translate_batch(
+                    bodies,
+                    client,
+                    cfg.lang,
+                    cp932=cfg.cp932_safe,
+                    cache=cache,
+                    chunk=cfg.batch_size,
+                    log=log,
+                    progress=_file_progress,
+                    should_cancel=should_cancel,
+                    source_lang=getattr(cfg, "source_lang", "ja") or "ja",
+                    game_dir=cfg.game_dir or cfg.text_dir,
+                    do_polish=getattr(cfg, "mt_polish", True),
+                )
+                for (idx, prefix, _body), dst in zip(need, translated):
+                    if dst and str(dst).strip():
+                        cn_lines[idx] = prefix + dst
+                text = "\n".join(cn_lines)
+                if path.read_bytes()[-1:] == b"\n":
+                    text += "\n"
+                out.write_text(text, encoding="utf-8")
+                done_lines += len(need)
+                file_count += 1
+                if progress:
+                    progress(done_lines, grand_total)
+                continue
+
             lines, pending = _collect_utf_lines(path)
-            need = [(i, p, b) for i, p, b in pending if JP_HINT.search(b)]
+            need = list(pending)
             if not need:
                 shutil.copy2(path, out)
                 file_count += 1
@@ -150,19 +229,6 @@ def translate_utf_tree(
                     progress(min(base + d, grand_total), grand_total)
 
             bodies = [b for _, _, b in need]
-            rfilt = remain_filter_set(cfg)
-            if rfilt is not None:
-                kept = [(i, p, b) for i, p, b in need if b in rfilt]
-                if not kept:
-                    shutil.copy2(path, out)
-                    file_count += 1
-                    if progress:
-                        progress(done_lines, grand_total)
-                    continue
-                need = kept
-                bodies = [b for _, _, b in need]
-                if log:
-                    log(f"仅译漏句: 本文件保留 {len(need)} 条")
             translated = translate_batch(
                 bodies,
                 client,
@@ -360,11 +426,16 @@ def repair_remaining_jp(
             if not jm or not cm:
                 continue
             jbody, cbody = jm.group(2), cm.group(2)
-            if jbody != cbody:
-                continue
-            if not JP_HINT.search(jbody):
-                continue
             if _is_ellipsis_only(jbody):
+                continue
+            if looks_already_chinese(jbody) and not looks_untranslated(cbody):
+                continue
+            if jbody != cbody:
+                # CN differs but still looks Japanese → re-translate from JP
+                if looks_untranslated(cbody) and not looks_already_chinese(cbody):
+                    pending.append((i, jm.group(1), jbody))
+                continue
+            if not (JP_HINT.search(jbody) or looks_untranslated(jbody)):
                 continue
             pending.append((i, jm.group(1), jbody))
         if pending:
@@ -545,22 +616,30 @@ def run_reallive(cfg: AppConfig, log: LogFn = None, progress: ProgressFn = None,
     if log and repaired:
         log(f"补翻残留日文 {repaired} 条")
 
-    # Remainder report from CN tree (still-JP lines)
+    # Remainder report: bare dialogue bodies (must match remain_filter keys)
     try:
         left: List[str] = []
+        mapping: dict[str, str] = {}
         for p in sorted(cn_dir.rglob("*.utf")):
             try:
-                for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                    body = line.strip()
-                    if body and JP_HINT.search(body):
+                for line in _read_utf_lines(p):
+                    body = _utf_body(line)
+                    if body is None or not body.strip():
+                        continue
+                    if looks_already_chinese(body):
+                        continue
+                    if _is_ellipsis_only(body):
+                        continue
+                    if looks_untranslated(body) or JP_HINT.search(body):
                         left.append(body)
+                        mapping[body] = body
             except OSError:
                 continue
         write_remainder_report(
             game_dir,
             "reallive",
             left,
-            {s: s for s in left},
+            mapping,
             log=log,
             allow=remain_filter_set(cfg),
             max_n=2000,

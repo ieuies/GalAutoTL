@@ -271,9 +271,17 @@ def apply_translations(items: List[WorkItem], translated: List[str], game_dir: P
     # group by file
     from collections import defaultdict
 
+    from app.core.pipeline_harden import looks_already_chinese
+
     by_file: dict[Path, list[tuple[WorkItem, str]]] = defaultdict(list)
     for it, dst in zip(items, translated):
+        if looks_already_chinese(it.source):
+            continue
+        if not dst or dst == it.source:
+            continue
         by_file[it.path].append((it, dst))
+    if not by_file:
+        return
 
     for path, group in by_file.items():
         backup_file(path, game_dir, do_backup, log)
