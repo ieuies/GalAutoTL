@@ -5,8 +5,17 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QFont, QTextCursor
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    Qt,
+    QThread,
+    QUrl,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -15,6 +24,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import AppConfig, config_path
+from app.assets import app_icon_path
 from app.core.cp932_safe import explain_dots
 from app.core.detect import detect_engine
 from app.core.ensure_deps import ensure_runtime_deps
@@ -237,11 +248,15 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GalAutoTL · Galgame 自动汉化")
-        self.resize(1120, 760)
-        self.setMinimumSize(920, 640)
+        self.resize(1180, 780)
+        self.setMinimumSize(960, 660)
+        icon_path = app_icon_path()
+        if icon_path is not None:
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.cfg = AppConfig.load()
         self._thread: QThread | None = None
         self._worker: Worker | None = None
+        self._fade_anim: QPropertyAnimation | None = None
         self._build_ui()
         self._load_cfg_to_ui()
         self._apply_simple_mode()
@@ -251,13 +266,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if getattr(self, "_did_fade", False):
+            return
+        self._did_fade = True
+        effect = QGraphicsOpacityEffect(self.centralWidget())
+        self.centralWidget().setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(420)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim = anim
+        anim.start()
+
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("centralRoot")
         self.setCentralWidget(root)
         shell = QHBoxLayout(root)
-        shell.setContentsMargins(16, 16, 16, 16)
-        shell.setSpacing(14)
+        shell.setContentsMargins(20, 20, 20, 20)
+        shell.setSpacing(18)
 
         # —— Left: controls ——
         left_wrap = QWidget()
@@ -266,31 +296,25 @@ class MainWindow(QMainWindow):
         left_wrap.setMaximumWidth(460)
         left = QVBoxLayout(left_wrap)
         left.setContentsMargins(0, 2, 0, 2)
-        left.setSpacing(12)
+        left.setSpacing(14)
 
         hero = QFrame()
-        hero.setObjectName("heroCard")
+        hero.setObjectName("brandRail")
         hl = QVBoxLayout(hero)
-        hl.setContentsMargins(18, 16, 18, 16)
-        hl.setSpacing(6)
+        hl.setContentsMargins(20, 18, 20, 18)
+        hl.setSpacing(4)
         mark = QLabel("GALAUTOTL")
         mark.setObjectName("brandMark")
-        title = QLabel("自动汉化工作台")
+        title = QLabel("GalAutoTL")
         title.setObjectName("brandTitle")
-        sub = QLabel("选目录 · 识引擎 · AI 精翻写回")
+        sub = QLabel("Galgame 自动汉化工作台")
         sub.setObjectName("brandSub")
-        steps = QHBoxLayout()
-        steps.setSpacing(6)
-        for t in ("① 游戏目录", "② API Key", "③ 开始汉化"):
-            pill = QLabel(t)
-            pill.setObjectName("stepPill")
-            steps.addWidget(pill)
-        steps.addStretch(1)
+        steps = QLabel("选目录  →  识引擎  →  开始汉化")
+        steps.setObjectName("stepLine")
         hl.addWidget(mark)
         hl.addWidget(title)
         hl.addWidget(sub)
-        hl.addSpacing(4)
-        hl.addLayout(steps)
+        hl.addWidget(steps)
         left.addWidget(hero)
 
         game_card = _card()
@@ -373,15 +397,15 @@ class MainWindow(QMainWindow):
         left.addWidget(opt_card)
 
         act = QHBoxLayout()
-        act.setSpacing(8)
+        act.setSpacing(10)
         self.start_btn = QPushButton("开始汉化")
         self.start_btn.setObjectName("primaryBtn")
         self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.start_btn.setMinimumHeight(48)
+        self.start_btn.setMinimumHeight(52)
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.setObjectName("dangerBtn")
         self.cancel_btn.setEnabled(False)
-        self.cancel_btn.setMinimumHeight(48)
+        self.cancel_btn.setMinimumHeight(52)
         self.start_btn.clicked.connect(self.on_start)
         self.cancel_btn.clicked.connect(self.on_cancel)
         act.addWidget(self.start_btn, 3)
@@ -392,10 +416,12 @@ class MainWindow(QMainWindow):
         tl = QVBoxLayout(tools_card)
         tl.setContentsMargins(16, 14, 16, 14)
         tl.setSpacing(10)
-        tl.addWidget(self._section("快捷工具"))
+        tools_cap = QLabel("快捷工具")
+        tools_cap.setObjectName("sectionTitle")
+        tl.addWidget(tools_cap)
         tools = QGridLayout()
-        tools.setHorizontalSpacing(6)
-        tools.setVerticalSpacing(6)
+        tools.setHorizontalSpacing(8)
+        tools.setVerticalSpacing(8)
         self.save_btn = QPushButton("保存设置")
         self.open_backup_btn = QPushButton("打开备份")
         self.review_btn = QPushButton("对照表")
@@ -417,6 +443,7 @@ class MainWindow(QMainWindow):
         for i, (b, tip) in enumerate(tool_items):
             b.setObjectName("ghostBtn")
             b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             tools.addWidget(b, i // 3, i % 3)
         tl.addLayout(tools)
         self.save_btn.clicked.connect(self.on_save)
@@ -434,6 +461,7 @@ class MainWindow(QMainWindow):
         self.unity_lock_btn = QPushButton("Unity 锁定离线")
         for b in (self.unity_harvest_btn, self.unity_lock_btn):
             b.setObjectName("ghostBtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
         self.unity_harvest_btn.setToolTip(
             "开启后漏句经本地代理调用 API 写入词典。玩一会后再点「锁定离线」。"
         )
@@ -505,6 +533,7 @@ class MainWindow(QMainWindow):
         left.addStretch(1)
 
         left_scroll = QScrollArea()
+        left_scroll.setObjectName("leftScroll")
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -517,28 +546,30 @@ class MainWindow(QMainWindow):
         right = QFrame()
         right.setObjectName("rightPane")
         rl = QVBoxLayout(right)
-        rl.setContentsMargins(16, 16, 16, 16)
-        rl.setSpacing(10)
+        rl.setContentsMargins(20, 18, 20, 18)
+        rl.setSpacing(12)
         head = QHBoxLayout()
-        pane_title = QLabel("运行控制台")
+        pane_title = QLabel("运行日志")
         pane_title.setObjectName("paneTitle")
-        pane_hint = QLabel("汉化进度与引擎日志")
+        pane_hint = QLabel("引擎探测 · 翻译进度 · 写回结果")
         pane_hint.setObjectName("paneHint")
         head_l = QVBoxLayout()
-        head_l.setSpacing(2)
+        head_l.setSpacing(3)
         head_l.addWidget(pane_title)
         head_l.addWidget(pane_hint)
         head.addLayout(head_l, 1)
         self.progress_label = QLabel("就绪")
-        self.progress_label.setObjectName("paneHint")
-        head.addWidget(self.progress_label, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.progress_label.setObjectName("statusChip")
+        self.progress_label.setProperty("state", "idle")
+        head.addWidget(
+            self.progress_label, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         rl.addLayout(head)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setTextVisible(False)
         rl.addWidget(self.progress_bar)
 
         self.log_view = QTextEdit()
@@ -548,7 +579,9 @@ class MainWindow(QMainWindow):
         self.log_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.log_view.setPlaceholderText("日志将显示在这里…\n选择游戏目录后可自动探测引擎。")
+        self.log_view.setPlaceholderText(
+            "日志将显示在这里…\n选择游戏目录后可自动探测引擎。"
+        )
         rl.addWidget(self.log_view, 1)
         shell.addWidget(right, 1)
 
@@ -557,11 +590,29 @@ class MainWindow(QMainWindow):
         lab.setObjectName("sectionTitle")
         return lab
 
+    def _set_status_chip(self, text: str, state: str = "idle") -> None:
+        self.progress_label.setText(text)
+        self.progress_label.setProperty("state", state)
+        self.progress_label.style().unpolish(self.progress_label)
+        self.progress_label.style().polish(self.progress_label)
+
     def _set_engine_badge(self, text: str, state: str = "ok") -> None:
         self.detect_label.setText(text)
         self.detect_label.setProperty("state", state)
         self.detect_label.style().unpolish(self.detect_label)
         self.detect_label.style().polish(self.detect_label)
+        # brief attention pulse on the badge when engine is found
+        if state == "ok" and self.detect_label.isVisible():
+            effect = QGraphicsOpacityEffect(self.detect_label)
+            self.detect_label.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(280)
+            anim.setStartValue(0.35)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.finished.connect(lambda: self.detect_label.setGraphicsEffect(None))
+            anim.start()
+            self._badge_anim = anim
 
     def _apply_simple_mode(self) -> None:
         simple = self.simple_mode.isChecked()
@@ -815,7 +866,7 @@ class MainWindow(QMainWindow):
         self.remain_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setRange(0, 0)
-        self.progress_label.setText("润色中…")
+        self._set_status_chip("润色中…", "run")
         self.append_log("==== 仅润色已有译文（不调用 API）====")
         self._thread = QThread()
         self._worker = Worker(cfg, "polish_only")
@@ -857,7 +908,7 @@ class MainWindow(QMainWindow):
         self.remain_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setRange(0, 0)
-        self.progress_label.setText("仅译漏句…")
+        self._set_status_chip("仅译漏句…", "run")
         self.append_log(f"==== 仅译漏句（{len(jp)} 条）====")
         self._thread = QThread()
         self._worker = Worker(cfg, "remain_only")
@@ -934,7 +985,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setRange(0, 0)  # busy
-        self.progress_label.setText("汉化中…")
+        self._set_status_chip("汉化中…", "run")
         self.append_log("==== 开始一键汉化 ====")
         self.append_log(f"游戏: {cfg.game_dir}")
 
@@ -1016,18 +1067,18 @@ class MainWindow(QMainWindow):
         if self._worker:
             self._worker.request_cancel()
             self.append_log("正在取消…")
-            self.progress_label.setText("正在取消…")
+            self._set_status_chip("正在取消…", "warn")
 
     @Slot(int, int)
     def on_progress(self, done: int, total: int) -> None:
         if total > 0:
             pct = min(100, int(100 * done / total))
-            self.progress_label.setText(f"总进度 {done}/{total}（{pct}%）")
+            self._set_status_chip(f"{done}/{total} · {pct}%", "run")
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(min(done, total))
             self.progress_bar.setFormat(f"%p%  {done}/{total}")
         else:
-            self.progress_label.setText("汉化中…")
+            self._set_status_chip("汉化中…", "run")
             self.progress_bar.setRange(0, 0)
 
     @Slot(bool, str)
@@ -1039,7 +1090,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100 if ok else 0)
         self.progress_bar.setFormat("完成" if ok else "失败")
-        self.progress_label.setText("完成" if ok else "失败")
+        self._set_status_chip("完成" if ok else "失败", "ok" if ok else "fail")
         self.append_log(f"==== {'成功' if ok else '失败'}: {msg} ====")
         if ok:
             extra = ""
@@ -1069,10 +1120,17 @@ class MainWindow(QMainWindow):
 def run_app() -> int:
     import sys
 
+    from PySide6.QtGui import QIcon
+
+    from app.assets import app_icon_path
+
     app = QApplication(sys.argv)
     app.setApplicationName("GalAutoTL")
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
+    icon_path = app_icon_path()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
     win = MainWindow()
     win.show()
     return app.exec()

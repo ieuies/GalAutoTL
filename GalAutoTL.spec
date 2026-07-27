@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('app\\assets', 'app\\assets')]
 binaries = []
 hiddenimports = ['UnityPy', 'UnityPy.files']
 tmp_ret = collect_all('UnityPy')
@@ -42,4 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['app\\assets\\galautotl.ico'],
 )
