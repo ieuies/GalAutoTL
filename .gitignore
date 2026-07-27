@@ -17,10 +17,10 @@ build_log.txt
 
 # Scratch / one-off localization dumps (never commit)
 _*/
-_*.py
-_*.txt
-_*.json
-_*.ascii.txt
+/_*.py
+/_*.txt
+/_*.json
+/_*.ascii.txt
 lcse_diagnose_samples.txt
 
 # Game workdirs that may appear if someone runs from repo root
