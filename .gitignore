@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+.env
+*.sqlite
+*.sqlite3
+
+# Local caches / runtime
+cache/
+tools/cache/
+*.log
+build_log.txt
+
+# Scratch / one-off localization dumps (never commit)
+_*/
+_*.py
+_*.txt
+_*.json
+_*.ascii.txt
+lcse_diagnose_samples.txt
+
+# Game workdirs that may appear if someone runs from repo root
+_galautotl_*/
+cn_scenario/
+cn_bgi_scripts/
+GalAutoTL_review.txt
+GalAutoTL_remain.txt
+GalAutoTL_image_ui.txt
+GalAutoTL.txt
+GalAutoTL_glossary*.txt
+
+# Local IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
