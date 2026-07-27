@@ -159,6 +159,9 @@ def looks_untranslated(s: str) -> bool:
         return True
     if _KATA_UI.fullmatch(s) and 1 < len(s) <= 24:
         return True
+    # Mixed kata + kanji UI (ゲーム終了) — not covered by kana-only or kanji-only branches
+    if re.search(r"[\u30a0-\u30ff]", s) and _HAS_CJK.search(s):
+        return True
     # Kanji-only JP UI (確認/設定/選択肢) — previously missed forever
     if _HAS_CJK.search(s) and not _HAS_KANA.search(s) and len(s) <= 64:
         return True
