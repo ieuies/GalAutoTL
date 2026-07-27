@@ -17,11 +17,13 @@ from app.core.glossary import (
     enforce_glossary_consistency,
     glossary_from_mapping,
     harvest_name_candidates,
+    has_glossary_leak,
     load_auto_glossary,
     load_glossary_for_game,
     mask_glossary_terms,
     merge_glossaries,
     save_glossary,
+    scrub_glossary_artifacts,
     unmask_glossary_terms,
     verify_glossary_consistency,
     write_candidates_file,
@@ -76,7 +78,7 @@ def _system_prompt(lang: str, source_lang: str = "auto", glossary_block: str = "
         "1. 严格对照原文意思与信息量，不漏译、不乱添、不篡改剧情；\n"
         "2. 语气、敬语、吐槽、口癖、暧昧感要贴合角色，写成能进游戏的自然台词；\n"
         "3. 结合给出的上文/下文理解指代与语气，但只翻译「本句」；\n"
-        "4. 专有名词占位符 {{GALTL0}} 等必须原样保留，不要翻译或删改；\n"
+        "4. 专有名词占位符 ⟦GALTL_A⟧ / ⟦GALTL_B⟧ 等必须原样保留，不要翻译、删改或改成数字；\n"
         "5. 脚本标记占位符 {{T0}}、[p]、\\p 等必须原样保留；\n"
         "6. 避免翻译腔、字对字硬译、整句被简化成摘要；\n"
         "7. 若原文已是目标中文，原样输出；\n"
@@ -253,6 +255,8 @@ def _translate_ordered_with_context(
             if hit is None:
                 # fallback: same text without context (older cache)
                 hit = cache.get(text, lang, client.model, source_lang)
+            if hit is not None and has_glossary_leak(hit):
+                hit = None  # poisoned cache from older placeholder bugs
             if hit is not None:
                 results[i] = hit
                 continue
@@ -320,7 +324,8 @@ def _translate_ordered_with_context(
                 dst = text
             dst = _finalize(dst, False, text, lang, do_polish)
             results[i] = dst
-            if cache:
+            # Never cache placeholder debris / 0-collapse — it poisons later runs
+            if cache and not has_glossary_leak(dst):
                 cache.put(_cache_payload(prev, text), lang, client.model, dst, cache_lang)
                 cache.put(text, lang, client.model, dst, source_lang)
         done += len(batch_ids)
@@ -489,7 +494,7 @@ def translate_batch(
 ) -> List[str]:
     """
     Translate in game order with neighbor context.
-    Glossary terms → {{GALTLn}} placeholders; optional GalAutoTL_review.txt overrides.
+    Glossary terms → ⟦GALTL_A⟧ placeholders; optional GalAutoTL_review.txt overrides.
 
     cp932 / cache 必须用关键字传入，避免把 TranslateCache 误当成 cp932=True
     （会把汉字打成「・」且完全不写缓存）。
@@ -633,11 +638,23 @@ def translate_batch(
 
         work_src = [texts[i] for i in need_idx]
         work_dst: List[str] = []
+        leak_fallback = 0
         for i, dst in zip(need_idx, translated):
+            src = texts[i]
             _masked, keys = masked_for_idx[i]
             if gloss and keys:
                 dst = unmask_glossary_terms(dst, gloss, keys)
+            if has_glossary_leak(dst):
+                dst = scrub_glossary_artifacts(
+                    dst, src=src or "", glossary=gloss, keys=keys
+                )
+            if has_glossary_leak(dst):
+                # Safer than shipping {{GALTL}} / 0夏 into scripts (can crash engines)
+                leak_fallback += 1
+                dst = src
             work_dst.append(dst)
+        if log and leak_fallback:
+            log(f"术语占位符损坏 {leak_fallback} 条，已回退原文（避免写入坏句）")
 
         if gloss:
             work_dst = enforce_glossary_consistency(work_src, work_dst, gloss)
@@ -650,6 +667,12 @@ def translate_batch(
 
         for i, src, dst in zip(need_idx, work_src, work_dst):
             results[i] = _finalize(dst, cp932, src, lang, do_polish)
+            # Cache good unmasked CN under original JP so later runs skip re-mask debris
+            if cache and src and dst and dst != src and not has_glossary_leak(dst):
+                try:
+                    cache.put(src, lang, client.model, dst, source_lang)
+                except Exception:
+                    pass
 
     if root:
         try:

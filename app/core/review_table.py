@@ -21,6 +21,26 @@ _BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+# Glossary placeholder / numeral corruption — never 灌回 these into live CN
+
+
+def is_corrupt_review_cn(cn: str) -> bool:
+    """True if CN still has broken glossary placeholders or 0-corruption."""
+    if not cn:
+        return False
+    try:
+        from app.core.glossary import has_glossary_leak
+
+        return has_glossary_leak(cn)
+    except Exception:
+        return bool(
+            re.search(
+                r"\{\{\s*GALTL|GALTL\d|⟦GALTL|0夏|0个人|0声",
+                cn,
+                re.I,
+            )
+        )
+
 
 def review_path(game_dir: Path | str) -> Path:
     return Path(game_dir) / REVIEW_NAME
@@ -111,8 +131,13 @@ def export_review_table(
         # Keep hand-edited / prior good CN when this batch has a hole (empty or JP)
         if old.strip() and old != src_s and (not dst_s.strip() or dst_s == src_s):
             pass
-        elif dst_s.strip():
+        elif dst_s.strip() and not is_corrupt_review_cn(dst_s):
             merged[src_s] = dst_s
+        elif dst_s.strip() and is_corrupt_review_cn(dst_s):
+            # Never persist placeholder debris; drop prior corrupt too
+            if is_corrupt_review_cn(old):
+                merged.pop(src_s, None)
+            # else keep prior good CN
         elif src_s not in merged:
             merged[src_s] = dst_s
         if src_s not in batch_seen:
@@ -137,7 +162,7 @@ def export_review_table(
     lines = [
         "# GalAutoTL 对照表（人工校对用）",
         "# 优先按 ### 编号灌回（与提取顺序一致）；编号对不上时再按 JP 全文匹配。",
-        "# 只改 CN: 行；保留 {{T0}} / {{GALTL0}} 等占位符，否则停顿标签会丢。",
+        "# 只改 CN: 行；对照表不要保留 ⟦GALTL_A⟧ / {{GALTL0}} / 0夏 等损坏痕迹。",
         "# 多行已写成 \\n；反斜杠写成 \\\\。不要删 ### / JP: / CN: 行头。",
         "# 也可追加一行式：原文<=>译文",
         "# 再次导出 / 漏翻二扫会与本文合并，不会冲掉未改动的条目。",
@@ -181,6 +206,8 @@ def load_review_maps(
         dst = _unescape_body(m.group(3).strip())
         if not src or not dst:
             continue
+        if is_corrupt_review_cn(dst):
+            continue
         by_idx[num - 1] = (src, dst)
         by_src[src] = dst
 
@@ -197,7 +224,7 @@ def load_review_maps(
         else:
             continue
         src, dst = _unescape_body(a.strip()), _unescape_body(b.strip())
-        if src and dst:
+        if src and dst and not is_corrupt_review_cn(dst):
             by_src[src] = dst
     return by_idx, by_src
 
@@ -218,9 +245,9 @@ def resolve_review_override(
     hit = by_idx.get(index)
     if hit is not None:
         jp, cn = hit
-        if jp == src and cn.strip():
+        if jp == src and cn.strip() and not is_corrupt_review_cn(cn):
             return cn
     cn = by_src.get(src)
-    if cn is not None and cn.strip():
+    if cn is not None and cn.strip() and not is_corrupt_review_cn(cn):
         return cn
     return None

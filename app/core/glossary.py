@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """Proper-noun glossary with hard consistency guarantees.
 
-Correctness model (not prompt hope):
-1. Segment each line by glossary source terms (longest-first, left-to-right).
-2. Only send non-term segments to the model.
-3. Reassemble using fixed glossary destinations.
-
-So names never enter the model and cannot drift across batches.
+Mask SRC terms as ⟦GALTL_A⟧ (letter codes, never digits), send to the model,
+then unmask to fixed DST. Digit placeholders like {{GALTL0}} were collapsed by
+models into bare「0」(0个人/0夏) and could crash script engines.
 """
 from __future__ import annotations
 
@@ -28,6 +25,48 @@ CANDIDATE_NAME = "GalAutoTL_glossary_candidates.txt"
 # Ignore trivial / asset-like "names"
 _SKIP_DST = re.compile(r"^[\s\d\._\-/\\:]+$")
 _HAS_WORD = re.compile(r"[\u3040-\u30ff\u4e00-\u9fffA-Za-z]")
+
+# Placeholder design notes:
+# - Old form {{GALTL0}} ends with a digit; models often "helpfully" collapse it to bare「0」,
+#   producing 0个人 / 0夏 / 0声 — and leftover {{GALTL0} can crash Sakana script parsers.
+# - New form uses letter codes only: ⟦GALTL_A⟧ (no digits).
+_PH_OPEN = "⟦"
+_PH_CLOSE = "⟧"
+
+
+def _idx_to_code(idx: int) -> str:
+    """0→A, 25→Z, 26→AA (bijective base-26, no digits)."""
+    n = idx + 1
+    letters: List[str] = []
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        letters.append(chr(ord("A") + r))
+    return "".join(reversed(letters))
+
+
+def _code_to_idx(code: str) -> int:
+    n = 0
+    for ch in (code or "").upper():
+        if not ("A" <= ch <= "Z"):
+            return -1
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    return n - 1
+
+
+def placeholder_token(idx: int) -> str:
+    return f"{_PH_OPEN}GALTL_{_idx_to_code(idx)}{_PH_CLOSE}"
+
+
+# Well-formed + broken leftovers (new letter form + legacy digit form)
+_GALTL_NEW = re.compile(r"⟦\s*GALTL_([A-Z]+)\s*⟧", re.I)
+_GALTL_NEW_BROKEN = re.compile(r"⟦\s*GALTL_([A-Z]*)\s*⟧?", re.I)
+_GALTL_LEGACY = re.compile(r"\{\{\s*GALTL\s*(\d+)\s*\}\}", re.I)
+_GALTL_LEGACY_BROKEN = re.compile(r"\{\{\s*GALTL\s*(\d*)\s*\}?\s*", re.I)
+_GALTL_BARE = re.compile(r"GALTL[_]?([A-Z]+|\d+)", re.I)
+# Digit-collapse corruption after a mangled {{GALTL0}}
+_CORRUPT_ZERO = re.compile(
+    r"0夏|0个人|0声|另0个|这样0个|0件需要|但0想|只有我0|遇到的0"
+)
 _HAS_KANA = re.compile(r"[\u3040-\u30ff]")
 _HAS_KANJI = re.compile(r"[\u4e00-\u9fff]")
 
@@ -504,7 +543,7 @@ def glossary_from_mapping(mapping: Dict[str, str]) -> Glossary:
 
 
 def mask_glossary_terms(text: str, glossary: Glossary) -> Tuple[str, List[str]]:
-    """Replace glossary SRC with {{GALTLn}} placeholders (longest-first, non-overlapping)."""
+    """Replace glossary SRC with ⟦GALTL_A⟧-style placeholders (longest-first)."""
     if not text or not glossary:
         return text or "", []
     spans: List[Tuple[int, int, str]] = []
@@ -534,8 +573,7 @@ def mask_glossary_terms(text: str, glossary: Glossary) -> Tuple[str, List[str]]:
     for a, b, src in chosen:
         if a > cur:
             parts.append(text[cur:a])
-        tok = f"{{{{GALTL{len(keys)}}}}}"
-        parts.append(tok)
+        parts.append(placeholder_token(len(keys)))
         keys.append(src)
         cur = b
     if cur < len(text):
@@ -543,23 +581,123 @@ def mask_glossary_terms(text: str, glossary: Glossary) -> Tuple[str, List[str]]:
     return "".join(parts), keys
 
 
-_GALTL_LOOSE = re.compile(r"\{\{\s*GALTL\s*(\d+)\s*\}\}", re.I)
+def has_glossary_leak(text: str) -> bool:
+    """True if CN still has placeholder debris or classic 0-corruption."""
+    if not text:
+        return False
+    if _GALTL_NEW.search(text) or _GALTL_LEGACY.search(text):
+        return True
+    if _GALTL_BARE.search(text):
+        return True
+    if "⟦GALTL" in text or "{{GALTL" in text or "GALTL" in text:
+        return True
+    if _CORRUPT_ZERO.search(text):
+        return True
+    return False
+
+
+def scrub_glossary_artifacts(
+    text: str,
+    *,
+    src: str = "",
+    glossary: Optional[Glossary] = None,
+    keys: Sequence[str] = (),
+) -> str:
+    """Strip leftover placeholders and repair common 0-collapse corruptions."""
+    if not text:
+        return ""
+    s = text
+    # Remove any remaining placeholder forms (already unmasked or mangled)
+    s = _GALTL_NEW.sub("", s)
+    s = _GALTL_NEW_BROKEN.sub("", s)
+    s = _GALTL_LEGACY.sub("", s)
+    s = _GALTL_LEGACY_BROKEN.sub("", s)
+    s = _GALTL_BARE.sub("", s)
+    s = s.replace("⟦", "").replace("⟧", "")
+    s = s.replace("{{", "").replace("}}", "")
+
+    dst_map = {a: b for a, b in glossary.pairs} if glossary else {}
+    # Prefer keys order when repairing
+    terms: List[Tuple[str, str]] = []
+    if keys:
+        for k in keys:
+            terms.append((k, dst_map.get(k, k)))
+    if glossary:
+        for a, b in glossary.pairs:
+            if a not in {t[0] for t in terms}:
+                terms.append((a, b))
+
+    jp = src or ""
+    # Digit-collapse repairs (guided by JP / glossary SRC)
+    if "千夏" in jp or any(t[0] == "千夏" for t in terms):
+        s = s.replace("0夏小姐", "千夏小姐").replace("0夏", "千夏")
+    if "二人" in jp or any(t[0] == "二人" for t in terms):
+        s = s.replace("0个人", "两个人")
+    elif "一人" in jp or "私しか" in jp or any(t[0] == "一人" for t in terms):
+        s = s.replace("0个人", "一个人")
+    if "一声" in jp or "と声を" in jp:
+        s = s.replace("发出0声", "发出一声").replace("0声", "一声")
+    if "別" in jp or "他の" in jp or "另" in s:
+        s = s.replace("另0个", "另一个").replace("另0人", "另一个人")
+    s = s.replace("这样0个", "这样一种")
+    s = s.replace("0件需要", "一件需要")
+    s = s.replace("但0想", "但一想")
+
+    # Generic: if a glossary DST was supposed to appear, fix remaining 0+suffix
+    for term_src, term_dst in terms:
+        if not term_src or (jp and term_src not in jp):
+            continue
+        if not term_dst:
+            continue
+        if term_dst.endswith("个人") and "0个人" in s:
+            s = s.replace("0个人", term_dst)
+        if "夏" in term_src and "0夏" in s:
+            s = s.replace("0夏" + term_dst[term_dst.find("夏") + 1 :], term_dst)
+            s = s.replace("0夏", term_src)
+
+    return s.strip() or text
 
 
 def unmask_glossary_terms(text: str, glossary: Glossary, keys: Sequence[str]) -> str:
     """Restore placeholders to glossary DST (fallback: original SRC). Scrub leftovers."""
     if not text:
         return ""
-    if not keys:
-        # still scrub stray tokens if model echoed them
-        return _GALTL_LOOSE.sub("", text)
-    dst_map = {src: dst for src, dst in glossary.pairs}
+    dst_map = {src: dst for src, dst in glossary.pairs} if keys else {}
 
-    def repl(m: re.Match) -> str:
-        idx = int(m.group(1))
+    def repl_letter(m: re.Match) -> str:
+        raw = (m.group(1) or "").upper()
+        if not raw or not keys:
+            return ""
+        idx = _code_to_idx(raw)
         if 0 <= idx < len(keys):
             src = keys[idx]
             return dst_map.get(src, src)
         return ""
 
-    return _GALTL_LOOSE.sub(repl, text)
+    def repl_digit(m: re.Match) -> str:
+        raw = m.group(1)
+        if raw == "" or not keys:
+            return ""
+        idx = int(raw)
+        if 0 <= idx < len(keys):
+            src = keys[idx]
+            return dst_map.get(src, src)
+        return ""
+
+    # Prefer well-formed tokens, then broken / legacy forms
+    out = _GALTL_NEW.sub(repl_letter, text)
+    out = _GALTL_NEW_BROKEN.sub(repl_letter, out)
+    out = _GALTL_LEGACY.sub(repl_digit, out)
+    out = _GALTL_LEGACY_BROKEN.sub(repl_digit, out)
+    out = _GALTL_BARE.sub(
+        lambda m: repl_letter(m)
+        if (m.group(1) or "").isalpha()
+        else repl_digit(m),
+        out,
+    )
+    return out
+
+
+# Back-compat alias used by older call sites / comments
+_GALTL_LOOSE = _GALTL_LEGACY
+_GALTL_BROKEN = _GALTL_LEGACY_BROKEN

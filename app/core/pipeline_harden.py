@@ -194,6 +194,15 @@ def sanitize_dst(dst: str, src: str, codec: str) -> Optional[str]:
         return None
     if d == src:
         return None
+    try:
+        from app.core.glossary import has_glossary_leak, scrub_glossary_artifacts
+
+        if has_glossary_leak(d):
+            d = scrub_glossary_artifacts(d, src=src or "")
+        if has_glossary_leak(d):
+            return None
+    except Exception:
+        pass
 
     if codec == CODEC_CP932:
         try:
@@ -400,6 +409,13 @@ def _seed_prior_cn(
         dst = None
         if src in review and review[src] and review[src] != src:
             dst = review[src]
+            try:
+                from app.core.glossary import has_glossary_leak
+
+                if has_glossary_leak(dst):
+                    dst = None
+            except Exception:
+                pass
         elif cache is not None and model:
             try:
                 hit = cache.get(src, lang, model, source_lang)

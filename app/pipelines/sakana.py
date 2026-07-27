@@ -14,9 +14,10 @@ from app.core.sakana_sx import (
     extract_sakana_pkg,
     find_sakana_pkg,
     open_sakana_pkg,
+    refresh_json_storage_md5_only,
     write_entry,
 )
-from app.core.sakana_text import apply_sakana_units, collect_sakana_units
+from app.core.sakana_text import apply_sakana_units, collect_sakana_units, is_sakana_safe_rel
 from app.core.pipeline_harden import (
     CODEC_UNICODE,
     mapping_aligned,
@@ -33,6 +34,32 @@ ProgressFn = Optional[Callable[[int, int], None]]
 CancelFn = Optional[Callable[[], bool]]
 
 
+def _seed_clearcache_strings(game_dir: Path, log: LogFn) -> None:
+    """Write msg_check_clearcache into skdata strings.json (do not rewrite dict.conf)."""
+    sk = Path.home() / "AppData" / "Roaming" / "skdata" / game_dir.name
+    sk.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dict": {
+            "msg_check_clearcache": "检测到游戏数据已更新，需要清理缓存后继续。是否清理？",
+            "msg_clearcache_complete": "缓存已清理。",
+        },
+        "msg_check_clearcache": "检测到游戏数据已更新，需要清理缓存后继续。是否清理？",
+        "msg_clearcache_complete": "缓存已清理。",
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    for rel in (
+        "strings.json",
+        "scenario/ja/strings.json",
+        "scenario/zh-CN/strings.json",
+        "scenario/en/strings.json",
+    ):
+        path = sk / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    if log:
+        log(f"已写入清缓存文案到 skdata\\{game_dir.name}\\strings.json")
+
+
 def _bak_dir(game_dir: Path) -> Path:
     return Path.home() / "Desktop" / "自动翻译备份" / f"sakana_{game_dir.name}"
 
@@ -45,6 +72,26 @@ def _backup_pkg(game_dir: Path, pkg: Path, log: LogFn) -> None:
             shutil.copy2(p, dest / p.name)
             if log:
                 log(f"备份: {dest / p.name}")
+
+
+def _clear_sakana_runtime_cache(game_dir: Path, log: LogFn) -> None:
+    """Move aside skdata/skcache so Start won't hit empty clear-cache dialog after MD5 change."""
+    roaming = Path.home() / "AppData" / "Roaming"
+    name = game_dir.name
+    for base in ("skdata", "skcache"):
+        p = roaming / base / name
+        if not p.exists():
+            continue
+        bak = p.with_name(p.name + "_bak_galautotl")
+        if bak.exists():
+            shutil.rmtree(bak, ignore_errors=True)
+        try:
+            shutil.move(str(p), str(bak))
+            if log:
+                log(f"已移走运行时缓存: %{base}%\\{name} → {bak.name}")
+        except OSError as ex:
+            if log:
+                log(f"警告: 无法移走 {p}: {ex}")
 
 
 def _entry_map(arc) -> Dict[str, object]:
@@ -73,8 +120,10 @@ def run_sakana(
     if not pkg:
         raise RuntimeError("未找到 SakanaGL 封包（pkg/*.sx + *.sxstorage）")
 
-    if cfg.do_backup:
-        _backup_pkg(game_dir, pkg, log)
+    # Always snapshot pkg once before any mutation (do_backup only affects logging verbosity)
+    _backup_pkg(game_dir, pkg, log if cfg.do_backup else None)
+    if not cfg.do_backup and log:
+        log("已静默备份 pkg（Sakana 回封风险高，强制保留原包）")
 
     rfilt = remain_filter_set(cfg)
     bak = _bak_dir(game_dir)
@@ -100,12 +149,22 @@ def run_sakana(
         log(f"SakanaGL 解包: {extract_pkg}")
     n, arc = extract_sakana_pkg(extract_pkg, scripts, only_text=True)
     if log:
+        for ai, sp in sorted(arc.storages.items()):
+            log(f"  arc[{ai}] → {sp.name} ({sp.stat().st_size} bytes)")
         log(f"解出文本相关文件 {n} 个（共索引 {len(arc.entries)} 项）")
     if n == 0:
         # retry all files then filter
         n, arc = extract_sakana_pkg(extract_pkg, scripts, only_text=False)
         if log:
             log(f"全量解出 {n} 个，再筛对白")
+
+    ks_idx = sum(1 for e in arc.entries if e.name.lower().endswith(".ks"))
+    ks_out = sum(1 for _ in scripts.rglob("*.ks"))
+    if ks_idx >= 3 and ks_out * 2 < ks_idx:
+        raise RuntimeError(
+            f"Sakana 剧本解包不完整：索引有 {ks_idx} 个 .ks，实际写出 {ks_out} 个。\n"
+            "多为封包映射错误；请更新工具后重新「开始汉化」（勿在错误解包上继续译）。"
+        )
 
     source_lang = getattr(cfg, "source_lang", "ja") or "ja"
     units = collect_sakana_units(scripts, source_lang=source_lang)
@@ -197,11 +256,14 @@ def run_sakana(
     if log:
         log(f"已写回解包文件 {nfiles} 个")
 
-    # patch storages (size-preserving) — always write live game pkg
+    # patch storages (size-preserving) — always write live game pkg; only scenario .ks
     emap = _entry_map(write_arc)
-    ok = fail = 0
-    changed_rels = {u.rel for u in units}
+    ok = fail = skipped_unsafe = 0
+    changed_rels = {u.rel for u in units if is_sakana_safe_rel(u.rel)}
     for rel in sorted(changed_rels):
+        if not is_sakana_safe_rel(rel):
+            skipped_unsafe += 1
+            continue
         # entry names may use backslash
         e = emap.get(rel) or emap.get(rel.replace("/", "\\"))
         if e is None:
@@ -222,15 +284,60 @@ def run_sakana(
             if log and fail <= 8:
                 log(f"回封跳过 {rel}: {ex}")
 
+    if ok:
+        try:
+            # JSON storages[].md5 only — never rewrite .sx / TitleScene / dict.conf.
+            updated = refresh_json_storage_md5_only(write_pkg)
+            if log:
+                log(f"已更新 JSON 封包 MD5（未改 .sx）: {len(updated)} 项")
+        except Exception as ex:
+            if log:
+                log(f"警告: JSON MD5 更新失败: {ex}")
+        bat = game_dir / "启动汉化版.bat"
+        bat.write_text(
+            "@echo off\r\n"
+            "cd /d \"%~dp0\"\r\n"
+            "start \"\" \"DangerousVillageTradition.exe\"\r\n",
+            encoding="utf-8",
+        )
+        # Also deploy loose scenario overlay (pkg MD5 change triggers empty clear-cache dialog).
+        try:
+            loose = game_dir / "scenario"
+            loose.mkdir(parents=True, exist_ok=True)
+            n_loose = 0
+            for rel in sorted(changed_rels):
+                src = scripts / rel
+                if src.is_file():
+                    dst = game_dir / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                    n_loose += 1
+            if log and n_loose:
+                log(f"已额外写出外挂剧本 {n_loose} 个到游戏目录 scenario\\（若封包开局被挡可作兜底）")
+        except Exception as ex:
+            if log:
+                log(f"警告: 外挂剧本写出失败: {ex}")
+        _clear_sakana_runtime_cache(game_dir, log)
+        try:
+            _seed_clearcache_strings(game_dir, log)
+        except Exception as ex:
+            if log:
+                log(f"警告: skdata 文案写入失败: {ex}")
+        if log:
+            log("请直接开 exe → 开始；若空确认框回标题，可再试仅用外挂 scenario（需原版 pkg）")
+
     readme = game_dir / "汉化启动说明_SakanaGL.txt"
     readme.write_text(
         "GalAutoTL SakanaGL 汉化说明\n"
         "==========================\n"
-        "1. 已备份 pkg 内 .sx/.sxstorage 到桌面「自动翻译备份\\sakana_游戏名」\n"
-        "2. 解包 → AI 译文本 → 等长/垫零写回 .sxstorage（槽位夹紧）\n"
-        "3. 工作目录: _galautotl_sakana\\\n"
-        "4. 直接运行游戏 exe 验证；若某句过长会跳过回封并保留日文\n"
-        f"5. 本次成功回封 {ok} 个文件，失败/跳过 {fail}\n",
+        "1. 已备份 pkg 到桌面「自动翻译备份\\sakana_游戏名」\n"
+        "2. 只回写 scenario/ep*.ks；绝不重写 .sx / TitleScene / dict.conf\n"
+        "3. 更新 JSON storages MD5；并在 skdata 写入清缓存文案\n"
+        "4. 直接双击 exe → 开始；若弹出确认框点「是」\n"
+        "5. 若完全打不开：用备份覆盖整个 pkg\n"
+        f"6. 本次成功回封 {ok} 个文件，失败/跳过 {fail}"
+        + (f"，拦截非剧本 {skipped_unsafe}" if skipped_unsafe else "")
+        + "\n",
         encoding="utf-8",
     )
     if log:

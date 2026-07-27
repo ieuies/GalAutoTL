@@ -14,6 +14,85 @@ HAS_LATIN = re.compile(r"[A-Za-z]{3,}")
 
 POISON = ("无法识别", "疑似乱码", "按原文输出", "无法翻译")
 
+# Only patch dialogue scripts. Writing UI (.scp) / shaders (.skfx) / clips back
+# into size-clamped slots routinely bricks SakanaGL boot (seen on DangerousVillageTradition).
+_SAFE_WRITE_SUFFIX = {".ks"}
+_SAFE_WRITE_PREFIXES = ("scenario/",)
+_SKIP_COLLECT_SUFFIX = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".ogg",
+    ".wav",
+    ".mp3",
+    ".webp",
+    ".dds",
+    ".scp",
+    ".skfx",
+    ".sk",
+    ".clp",
+    ".ssg",
+    ".sd",
+    ".proj",
+}
+
+
+def is_sakana_safe_rel(rel: str) -> bool:
+    """Paths safe to translate and write back into .sxstorage."""
+    rel = (rel or "").replace("\\", "/").lstrip("./").lower()
+    suf = Path(rel).suffix.lower()
+    if suf not in _SAFE_WRITE_SUFFIX:
+        return False
+    # Boot/macros — never MT (translating ;// docs into bare code bricks Start)
+    base = Path(rel).name.lower()
+    if base in {"define.ks", "main.ks", "start.ks"}:
+        return False
+    if any(rel.startswith(p) for p in _SAFE_WRITE_PREFIXES):
+        return True
+    # bare *.ks under extract root (no folder)
+    return "/" not in rel and suf == ".ks"
+
+
+_CASE_RE = re.compile(r'^(\s*\[case\s+")([^"]+)("\s*\].*)$', re.IGNORECASE)
+
+
+def _is_structural_ks_line(line: str) -> bool:
+    """True if line must stay untouched (comments, tags, labels, code braces).
+
+    Exception: ``[case \"...\"]`` choice text is translatable.
+    """
+    s = (line or "").strip()
+    if not s:
+        return True
+    if s.startswith(";") or s.startswith("//"):
+        return True
+    if _CASE_RE.match(s):
+        return False
+    if s.startswith("[") or s.startswith("{") or s.startswith("}"):
+        return True
+    if s.startswith("*"):
+        return True
+    if s.startswith("@"):
+        return True
+    return False
+
+
+def _case_inner(line: str) -> Optional[str]:
+    m = _CASE_RE.match(line.rstrip("\r\n"))
+    return m.group(2) if m else None
+
+
+def _case_rebuild(line: str, new_inner: str) -> str:
+    m = _CASE_RE.match(line.rstrip("\r\n"))
+    if not m:
+        return line
+    ending = ""
+    if line.endswith("\r\n"):
+        ending = "\r\n"
+    elif line.endswith("\n"):
+        ending = "\n"
+    return m.group(1) + new_inner + m.group(3) + ending
+
 
 @dataclass
 class SakanaUnit:
@@ -107,6 +186,8 @@ def collect_sakana_units(root: Path, source_lang: str = "ja") -> List[SakanaUnit
         if path.name.startswith("_"):
             continue
         rel = path.relative_to(root).as_posix()
+        if not is_sakana_safe_rel(rel):
+            continue
         try:
             data = path.read_bytes()
         except Exception:
@@ -125,8 +206,7 @@ def collect_sakana_units(root: Path, source_lang: str = "ja") -> List[SakanaUnit
                     if _want(val, source_lang):
                         units.append(SakanaUnit(rel, enc, "json", jpath, val))
                 continue
-        # line-based for other text
-        if suf in {".png", ".jpg", ".jpeg", ".ogg", ".wav", ".mp3", ".webp", ".dds"}:
+        if suf in _SKIP_COLLECT_SUFFIX:
             continue
         lines = text.splitlines(keepends=True)
         # if binary-ish skip
@@ -134,6 +214,13 @@ def collect_sakana_units(root: Path, source_lang: str = "ja") -> List[SakanaUnit
             continue
         for i, line in enumerate(lines):
             body = line.rstrip("\r\n")
+            case_inner = _case_inner(body)
+            if case_inner is not None:
+                if _want(case_inner, source_lang):
+                    units.append(SakanaUnit(rel, enc, "case", i, case_inner))
+                continue
+            if _is_structural_ks_line(body):
+                continue
             if _want(body, source_lang):
                 units.append(SakanaUnit(rel, enc, "line", i, body))
     return units
@@ -166,6 +253,7 @@ def apply_sakana_units(root: Path, units: List[SakanaUnit], translated: List[str
 
         json_items = [(u, t) for u, t in group if u.kind == "json"]
         line_items = [(u, t) for u, t in group if u.kind == "line"]
+        case_items = [(u, t) for u, t in group if u.kind == "case"]
 
         if json_items:
             try:
@@ -182,19 +270,49 @@ def apply_sakana_units(root: Path, units: List[SakanaUnit], translated: List[str
                 if data.endswith(b"\n"):
                     text += "\n"
 
-        if line_items:
+        if line_items or case_items:
             lines = text.splitlines(keepends=True)
+            for u, t in case_items:
+                i = int(u.meta)
+                if i >= len(lines):
+                    continue
+                nb = (t or "").strip().strip('"').strip("\u201c\u201d")
+                if not nb:
+                    continue
+                lines[i] = _case_rebuild(lines[i], nb)
             for u, t in line_items:
                 i = int(u.meta)
                 if i >= len(lines):
                     continue
-                ending = ""
                 raw = lines[i]
+                body = raw.rstrip("\r\n")
+                if _is_structural_ks_line(body):
+                    continue
+                ending = ""
                 if raw.endswith("\r\n"):
                     ending = "\r\n"
                 elif raw.endswith("\n"):
                     ending = "\n"
-                lines[i] = t + ending
+                indent = body[: len(body) - len(body.lstrip())]
+                new_body = (t or "").rstrip("\r\n")
+                if not body.lstrip().startswith("|"):
+                    while new_body.startswith("|"):
+                        new_body = new_body[1:]
+                if not new_body.strip():
+                    continue
+                # Sakana/KAG dialogue uses 「」; ASCII/curly quotes break Start scripting.
+                src = body.lstrip()
+                nb = new_body.lstrip()
+                if src.startswith("「") and src.endswith("」"):
+                    while len(nb) >= 2 and (
+                        (nb[0] in '「“"' and nb[-1] in '」”"')
+                    ):
+                        nb = nb[1:-1]
+                    nb = nb.replace("“", "『").replace("”", "』").replace('"', "")
+                    nb = "「" + nb + "」"
+                else:
+                    nb = nb.replace("“", "「").replace("”", "」")
+                lines[i] = indent + nb + ending
             text = "".join(lines)
 
         path.write_bytes(_encode(text, enc))
