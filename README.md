@@ -194,9 +194,34 @@ build_exe.bat
 - 点 **仅译漏句**：只翻译 remain 里仍漏的句子（需先完整汉化一次）  
 - 点 **图片UI清单**：扫描 `graphic=` / `storage=` 等，写出 `GalAutoTL_image_ui.txt`（改像素字仍靠手工）
 
+## 组合使用的外部项目
+
+本工具是编排/写回层，运行时会调用或下载下列上游（链接便于自行核对许可与版本）。**不是**它们的官方发行版。
+
+| 项目 | 用途 |
+|------|------|
+| [BepInEx](https://github.com/BepInEx/BepInEx) | Unity 注入框架（Mono / IL2CPP）；一键时自动下载安装 |
+| [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) | Unity 运行时词典替换；写 `GalAutoTL.txt`，并拉取其 Release 中的 TMP CJK 字体包治 □ |
+| [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) | IL2CPP `stringliteral.json` 采文（按需下载） |
+| [unity-libs（BepInEx）](https://unity.bepinex.dev/) | IL2CPP 基库 zip，避免首次卡在 Downloading unity base libraries |
+| [ManlyMarco / BruteForceFix](https://github.com/ManlyMarco/RandomPlugins) | XUA IL2CPP 补扫插件（会尝试安装；新 Interop 上常自动禁用） |
+| [KirikiriTools](https://github.com/arcusmaximus/KirikiriTools) | 自动部署 `version.dll`；`FE FE` 脚本还原逻辑参考其 Descrambler |
+| [GARbro](https://github.com/morkt/GARbro) / garbro-cli | 外调解加密封包（Kirikiri cxdec、YPF、部分 PFS/ARC 等）；需本机自备 |
+| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | YU-RIS YSTB 密钥/布局参考 |
+| [YuriSizuku/GalgameReverse](https://github.com/YuriSizuku/GalgameReverse)（artemis pf8）+ GARbro ArcPFS | Artemis PFS 解包实现参考 |
+| GARbro ArcSX（同上 GARbro 仓库） | SakanaGL `.sx` 索引解析移植 |
+| [UnityPy](https://github.com/K0lb3/UnityPy) | Unity 资源读写（pip） |
+| [TypeTreeGeneratorAPI](https://pypi.org/project/TypeTreeGeneratorAPI/) | IL2CPP MonoBehaviour 结构化采文（启动时可自动 pip） |
+| [PySide6](https://doc.qt.io/qtforpython/) | 图形界面 |
+| [PyInstaller](https://pyinstaller.org/) | 可选打单文件 EXE |
+| [zstandard](https://pypi.org/project/zstandard/) | SakanaGL 条目解压 |
+| DeepSeek / OpenAI 兼容 API | 批量机翻（自备 Key；默认 `api.deepseek.com`） |
+
+另：RealLive 等可选用你自备的 VNTextProxy / rldev / VNTextPatch（见 `tools/README.txt`），本程序不捆绑。下载 GitHub 资源时可能经 `ghfast.top` 镜像加速。
+
 ## 注意
 
 - 翻译消耗 API 额度。  
 - 请自行确认游戏版权与使用范围；本工具开源免费，仅辅助个人汉化学习，不附带任何游戏资源或完整汉化包。  
-- 第三方运行时（BepInEx、XUnity.AutoTranslator、Il2CppDumper、TMP 字体包、unity-libs）由程序按需下载或你本地放置；字形等授权以各上游为准，本项目不附带字体许可。  
+- 上表项目由程序按需下载、外调或本机放置；字形 / 运行时二进制等授权以各上游为准，本仓库不附带字体包与 BepInEx/XUA zip。  
 - 许可证见仓库根目录 `LICENSE`（MIT）。
