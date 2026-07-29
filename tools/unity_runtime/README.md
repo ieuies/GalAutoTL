@@ -19,3 +19,13 @@
 - `XUnity.AutoTranslator-BepInEx-*.zip`（非 IL2CPP）
 
 卡在日志 `Downloading unity base libraries` = 基库没下下来，用上面 `unity-libs` 离线包即可。
+
+## TMP 中文字体（治 □，可选离线）
+
+本仓库**不收录**字体包。一键汉化时会尝试从 XUA Release 下载：
+
+- https://github.com/bbepis/XUnity.AutoTranslator/releases  
+  （`TMP_Font_AssetBundles*.zip` / `.7z`）
+
+也可把下载好的压缩包放到本目录，或把解出的 `arialuni_sdf_u2019` 等直接放到游戏根目录。  
+字形授权归原字体权利人；本目录 zip **请勿提交到 Git**。

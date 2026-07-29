@@ -208,6 +208,19 @@ def load_review_maps(
             continue
         if is_corrupt_review_cn(dst):
             continue
+        try:
+            from app.core.xua_display_text import (
+                is_misaligned_ui_pair,
+                is_script_shell_key,
+                pair_has_index_leak,
+            )
+
+            if is_script_shell_key(src) or pair_has_index_leak(src, dst) or is_misaligned_ui_pair(
+                src, dst
+            ):
+                continue
+        except Exception:
+            pass
         by_idx[num - 1] = (src, dst)
         by_src[src] = dst
 

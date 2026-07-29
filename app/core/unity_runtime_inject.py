@@ -41,6 +41,183 @@ BRUTEFORCE_FIX_DLL_NAME = "AutoTranslator.IL2CPP.BruteForceFix.dll"
 BRUTEFORCE_FIX_DEP_OLD = bytes([0x03]) + b"5.4"
 BRUTEFORCE_FIX_DEP_NEW = bytes([0x03]) + b">=0"  # same packed length; widens range
 
+# TMP SDF CJK font bundles (OS font override is broken on many IL2CPP stacks)
+TMP_FONT_ZIP_ASSET = "TMP_Font_AssetBundles.zip"
+TMP_FONT_ZIP_URL = (
+    "https://github.com/bbepis/XUnity.AutoTranslator/releases/download/v5.4.4/"
+    + TMP_FONT_ZIP_ASSET
+)
+# Newer pack (7z) includes Unity 2021/2022 SDF bundles
+TMP_FONT_7Z_ASSET = "TMP_Font_AssetBundles_2025-12-08.7z"
+TMP_FONT_7Z_URL = (
+    "https://github.com/bbepis/XUnity.AutoTranslator/releases/download/v5.5.0/"
+    + TMP_FONT_7Z_ASSET
+)
+TMP_FONT_BUNDLE_PREFER = (
+    "arialuni_sdf_u2019",
+    "arialuni_sdf_u2021",
+    "arialuni_sdf_u2022",
+    "arialuni_sdf_u2018plus",
+    "arialuni_sdf_u2018",
+    "arialuni_sdf",
+)
+
+
+TMP_FONT_BUNDLE_GAME = "arialuni_sdf_game"
+_UNITYFS_MAGIC = b"UnityFS\x00"
+_UNITY_VER_IN_HEADER_RE = re.compile(rb"(20\d{2}\.\d+\.\d+[abfp]\d+)")
+
+
+def parse_unityfs_header(blob: bytes) -> Optional[Tuple[int, str]]:
+    if len(blob) < 32 or blob[:8] != _UNITYFS_MAGIC:
+        return None
+    fmt = int.from_bytes(blob[8:12], "big")
+    m = _UNITY_VER_IN_HEADER_RE.search(blob[:128])
+    ver = m.group(1).decode("ascii", errors="ignore") if m else ""
+    return fmt, ver
+
+
+def find_game_unityfs_header_sample(game_dir: Path) -> Optional[bytes]:
+    game_dir = Path(game_dir)
+    probe = game_dir / "_test_game_ufs"
+    if probe.is_file() and probe.stat().st_size >= 48:
+        return probe.read_bytes()[:128]
+    for data in game_dir.glob("*_Data"):
+        sa = data / "StreamingAssets"
+        if not sa.is_dir():
+            continue
+        # PARANORMASIGHT etc.: proprietary header then UnityFS within first ~256 bytes
+        for cand in sorted(sa.iterdir(), key=lambda p: p.stat().st_size if p.is_file() else 0):
+            if not cand.is_file() or cand.stat().st_size < 64:
+                continue
+            try:
+                head = cand.read_bytes()[:4096]
+            except OSError:
+                continue
+            if head[:8] == _UNITYFS_MAGIC:
+                return head[:128]
+            ufs = head.find(_UNITYFS_MAGIC)
+            if 0 < ufs < 512:
+                return head[ufs : ufs + 128]
+    return None
+
+
+def game_unityfs_target(game_dir: Path) -> Tuple[int, str, Optional[bytes]]:
+    sample = find_game_unityfs_header_sample(game_dir)
+    if sample:
+        parsed = parse_unityfs_header(sample)
+        if parsed:
+            return parsed[0], parsed[1], sample
+    full = detect_unity_version(game_dir) or ""
+    fmt = 7 if full.startswith(("2019.", "2020.", "2021.")) else 8
+    return fmt, full, sample
+
+
+def score_font_bundle_for_game(name: str, path: Path, game_fmt: int, game_ver: str) -> int:
+    try:
+        head = path.read_bytes()[:128]
+    except OSError:
+        return -10_000
+    parsed = parse_unityfs_header(head)
+    if not parsed:
+        return -10_000
+    fmt, ver = parsed
+    score = 0
+    if fmt <= game_fmt:
+        score += 50
+    else:
+        score -= 80
+    if fmt == game_fmt:
+        score += 25
+    gmaj = unity_version_short(game_ver)
+    vmaj = unity_version_short(ver)
+    if gmaj and vmaj == gmaj:
+        score += 30
+    if "u2019" in name:
+        score += 25
+    if ("u2021" in name or "u2022" in name) and game_fmt <= 7:
+        score -= 15
+    # Unity 2021.3.x (e.g. 2021.3.8): prefer u2019 bundle over u2021/u2022
+    if (game_ver or "").startswith("2021."):
+        if "u2019" in name:
+            score += 20
+        if "u2021" in name or "u2022" in name:
+            score -= 25
+    if name in TMP_FONT_BUNDLE_PREFER:
+        score += max(0, 10 - TMP_FONT_BUNDLE_PREFER.index(name))
+    return score
+
+
+def _delete_spoofed_tmp_font_game_bundle(game_dir: Path, log: LogFn = None) -> None:
+    """Remove legacy header-spoofed ``arialuni_sdf_game`` copies (breaks AssetBundle load)."""
+    game_dir = Path(game_dir)
+    for folder in (game_dir, game_dir / "BepInEx" / "Translation" / "Fonts"):
+        target = folder / TMP_FONT_BUNDLE_GAME
+        if not target.is_file():
+            continue
+        try:
+            target.unlink()
+            if log:
+                log(
+                    f"警告: 已删除损坏的 TMP 字体包 {target.name} "
+                    f"(不再使用 UnityFS 头伪装，请使用 arialuni_sdf_u2019 等原名包)"
+                )
+        except OSError as e:
+            if log:
+                log(f"删除 {target} 失败: {e}")
+
+
+def spoof_tmp_font_bundle_for_game(
+    game_dir: Path, bundle_name: str, log: LogFn = None
+) -> Optional[Path]:
+    """NO-OP: header spoofing produced unreadable bundles; deploy uses real bundle names."""
+    return None
+
+
+def _pick_best_tmp_font_on_disk(game_dir: Path) -> Optional[str]:
+    game_dir = Path(game_dir)
+    game_fmt, game_ver, _ = game_unityfs_target(game_dir)
+    best: Optional[Tuple[int, str, Path]] = None
+    seen: Set[str] = set()
+    for folder in (game_dir, game_dir / "BepInEx" / "Translation" / "Fonts"):
+        if not folder.is_dir():
+            continue
+        for name in TMP_FONT_BUNDLE_PREFER:
+            if name in seen:
+                continue
+            path = folder / name
+            if not path.is_file() or path.stat().st_size <= 100_000:
+                continue
+            seen.add(name)
+            sc = score_font_bundle_for_game(name, path, game_fmt, game_ver)
+            if best is None or sc > best[0]:
+                best = (sc, name, path)
+    if not best:
+        return None
+    _, name, path = best
+    if path.parent != game_dir:
+        shutil.copy2(path, game_dir / name)
+    return name
+
+
+def _ensure_game_matched_tmp_font(game_dir: Path, source_name: str, log: LogFn = None) -> str:
+    """Ensure the chosen bundle exists in the game root under its real name (no header spoof)."""
+    game_dir = Path(game_dir)
+    _delete_spoofed_tmp_font_game_bundle(game_dir, log)
+    dest = game_dir / source_name
+    if dest.is_file() and dest.stat().st_size > 100_000:
+        return source_name
+    for folder in (
+        game_dir / "BepInEx" / "Translation" / "Fonts",
+        game_dir,
+    ):
+        src = folder / source_name
+        if src.is_file() and src.stat().st_size > 100_000:
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+            return source_name
+    return source_name
+
 
 def runtime_cache_dir() -> Path:
     p = appdata_dir() / "unity_runtime"
@@ -262,6 +439,8 @@ def escape_at_key(s: str) -> str:
 
 
 _TMP_TAG_RE = re.compile(r"</?[^>\n]+>")
+# PARANORMASIGHT / Hazy AdvScript control tokens embedded in dialogue
+_ADV_TAG_RE = re.compile(r"\[[a-zA-Z_/][^\]\n]*\]")
 _ESC_U_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _LEADING_PUA_RE = re.compile(r"^[\ue000-\uf8ff\uf000-\uf0ff\s　]+")
 _SIZE_FIRST_RE = re.compile(
@@ -319,6 +498,15 @@ def expand_pair_variants(
     dst_plain = _TMP_TAG_RE.sub("", dst0)
     add(src_plain, dst_plain)
 
+    # Strip AdvScript [r]/[l]/[p] etc. (TMP may show text without control tokens)
+    if _ADV_TAG_RE.search(src0):
+        src_adv = _ADV_TAG_RE.sub("", src0).strip()
+        dst_adv = _ADV_TAG_RE.sub("", dst0).strip()
+        add(src_adv, dst_adv)
+        src_adv2 = _TMP_TAG_RE.sub("", src_adv).strip()
+        dst_adv2 = _TMP_TAG_RE.sub("", dst_adv).strip()
+        add(src_adv2, dst_adv2)
+
     # Strip leading private-use icon glyphs (different codepoints per font)
     src_noicon = _LEADING_PUA_RE.sub("", src_plain).lstrip()
     dst_noicon = _LEADING_PUA_RE.sub("", dst_plain).lstrip()
@@ -345,6 +533,11 @@ def expand_pair_variants(
 # Short UI words often hooked alone (not as long sentences)
 DEFAULT_UI_PAIRS: List[Pair] = [
     ("スタート", "开始"),
+    ("開始", "开始"),
+    ("ゲーム終了", "结束游戏"),
+    ("終了", "结束"),
+    ("ニューゲーム", "新游戏"),
+    ("続きから", "继续"),
     ("閉じる", "关闭"),
     ("敗北", "失败"),
     ("回想", "回想"),
@@ -358,16 +551,39 @@ DEFAULT_UI_PAIRS: List[Pair] = [
     ("ファイル", "文件"),
     ("ボイス再生", "语音播放"),
     ("テキストをコピーします", "复制文本"),
-    ("ドラッグ", "毒品"),
+    ("ドラッグ", "拖动"),
     ("クリア！", "通关！"),
+    # PARANORMASIGHT / Hazy UI (avoid tofu + misaligned review leftovers)
+    ("人物リスト", "人物列表"),
+    ("資料", "资料"),
+    ("資料リスト", "资料列表"),
+    ("公園前", "公园前"),
+    ("タイトルへ戻る", "返回标题"),
+    ("新着", "新到"),
+    ("途中から", "从中途"),
+    ("セーブ", "保存"),
+    ("ロード", "读取"),
+    ("オプション", "选项"),
+    ("ゲーム", "游戏"),
+    ("サウンド", "声音"),
+    ("上下反転", "上下反转"),
+    ("左右反転", "左右反转"),
+    ("決定ボタンの配置", "决定键配置"),
+    ("決定／キャンセルボタンの割り当てを変更します。", "更改决定／取消键的分配。"),
+    ("文化/社会", "文化/社会"),
+    ("ストーリーチャート", "剧情流程图"),
+    ("興家彰吾", "兴家彰吾"),
 ]
 
 
 def _junk_runtime_key(src: str) -> bool:
+    from app.core.xua_display_text import is_script_shell_key
     from app.core.xua_match_rules import is_poison_dict_key
 
     s = src.strip()
     if not s:
+        return True
+    if is_script_shell_key(s):
         return True
     if is_poison_dict_key(s):
         return True
@@ -446,13 +662,21 @@ def write_translation_file(
             pass
 
     from app.core.il2cpp_stringliteral import harvest_pua_icons
+    from app.core.xua_display_text import expand_pair_to_display
     from app.core.xua_match_rules import scrub_translation_pair
 
     cleaned: List[Pair] = []
     for src, dst in list(DEFAULT_UI_PAIRS) + list(pairs):
-        fixed = scrub_translation_pair(src, dst)
-        if fixed:
-            cleaned.append(fixed)
+        # Prefer display-level keys (WindowMessage body) over AdvScript shells
+        expanded = expand_pair_to_display(src, dst)
+        if not expanded and not _junk_runtime_key(src):
+            fixed0 = scrub_translation_pair(src, dst)
+            if fixed0:
+                expanded = [fixed0]
+        for a, b in expanded:
+            fixed = scrub_translation_pair(a, b)
+            if fixed:
+                cleaned.append(fixed)
     # Harvest TMP icon codepoints so short UI labels match カード図鑑 style
     pua_icons = harvest_pua_icons([s for s, _ in cleaned])
     for src, dst in cleaned:
@@ -547,9 +771,10 @@ def patch_autotranslator_ini_keys(path: Path, updates: dict) -> None:
                 block = re.sub(r"(?m)^Url\s*=\s*.*$", f"Url={value}", m.group(2), count=1)
                 text = text[: m.start(2)] + block + text[m.end(2) :]
                 continue
-        pat = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*).*$")
+        # IMPORTANT: do not use \s after '=' — it eats newlines and merges with next line
+        pat = re.compile(rf"(?m)^({re.escape(key)}[ \t]*=[ \t]*)([^\r\n]*)$")
         if pat.search(text):
-            text = pat.sub(rf"\g<1>{value}", text)
+            text = pat.sub(lambda m, v=value: m.group(1) + v, text)
         else:
             # append under [Behaviour] if present
             if "[Behaviour]" in text:
@@ -557,6 +782,185 @@ def patch_autotranslator_ini_keys(path: Path, updates: dict) -> None:
             else:
                 text += f"\n{key}={value}\n"
     path.write_text(text, encoding="utf-8")
+
+
+def ensure_tmp_cjk_font_bundle(game_dir: Path, log: LogFn = None) -> Optional[str]:
+    """Download/extract XUA TMP SDF CJK font into the game root; return bundle name."""
+    game_dir = Path(game_dir)
+    _delete_spoofed_tmp_font_game_bundle(game_dir, log)
+
+    picked = _pick_best_tmp_font_on_disk(game_dir)
+    if picked:
+        if log:
+            log(f"选用 TMP 字体源: {picked}")
+        return _ensure_game_matched_tmp_font(game_dir, picked, log)
+
+    fonts_dir = game_dir / "BepInEx" / "Translation" / "Fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_zip = runtime_cache_dir() / TMP_FONT_ZIP_ASSET
+    cache_7z = runtime_cache_dir() / TMP_FONT_7Z_ASSET
+    extract_dir = runtime_cache_dir() / "tmp_font_bundles"
+    got_archive = False
+
+    # Prefer 7z pack (multiple Unity-era bundles); fall back to older zip; scoring picks u2019 on 2021.3.x
+    for url, dest, min_sz in (
+        (TMP_FONT_7Z_URL, cache_7z, 5_000_000),
+        (TMP_FONT_ZIP_URL, cache_zip, 1_000_000),
+    ):
+        try:
+            _download(url, dest, log, min_size=min_sz)
+            got_archive = True
+            archive = dest
+            break
+        except Exception as e:
+            if log:
+                log(f"TMP 字体包下载失败 ({dest.name}): {e}")
+            continue
+    if not got_archive:
+        if log:
+            log(
+                f"请手动下载字体包后放到 {tools_runtime_dir()} ：\n"
+                f"  {TMP_FONT_7Z_URL}\n"
+                f"或 {TMP_FONT_ZIP_URL}"
+            )
+        return None
+
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if archive.suffix.lower() == ".7z":
+            import subprocess
+
+            r = subprocess.run(
+                ["7z", "x", str(archive), f"-o{extract_dir}", "-y"],
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr[-300:] or r.stdout[-300:] or "7z failed")
+        else:
+            with zipfile.ZipFile(archive, "r") as zf:
+                zf.extractall(extract_dir)
+    except Exception as e:
+        if log:
+            log(f"解压 TMP 字体包失败: {e}")
+        return None
+
+    # Find preferred bundle anywhere under extract_dir
+    found: Dict[str, Path] = {}
+    for p in extract_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        # Asset bundles often have no extension
+        key = p.name
+        if key in TMP_FONT_BUNDLE_PREFER or key.startswith("arialuni_sdf"):
+            found[key] = p
+
+    game_fmt, game_ver, _ = game_unityfs_target(game_dir)
+    best_score = -10_000
+    chosen: Optional[Path] = None
+    chosen_name = ""
+    for name, path in found.items():
+        sc = score_font_bundle_for_game(name, path, game_fmt, game_ver)
+        if sc > best_score:
+            best_score = sc
+            chosen_name, chosen = name, path
+
+    if not chosen:
+        if log:
+            log("TMP 字体包 zip 内未找到 arialuni_sdf_*")
+        return None
+
+    dest = game_dir / chosen_name
+    shutil.copy2(chosen, dest)
+    try:
+        shutil.copy2(chosen, fonts_dir / chosen_name)
+    except OSError:
+        pass
+    if log:
+        log(f"已部署 TMP 中文字体包 → {dest.name} ({dest.stat().st_size // 1024} KB)")
+    return _ensure_game_matched_tmp_font(game_dir, chosen_name, log)
+
+
+def ensure_xua_cjk_font(game_dir: Path, log: LogFn = None) -> str:
+    """Configure CJK fonts for XUA.
+
+    On many IL2CPP + Il2CppInterop stacks, ``CreateDynamicFontFromOSFont`` throws
+    TypeLoadException — so ``OverrideFont=Microsoft YaHei`` only spams errors and
+    never fixes □. Prefer a TMP SDF asset bundle (``arialuni_sdf_u2021`` etc.)
+    placed in the game root under its real name (e.g. ``arialuni_sdf_u2019`` for Unity 2021.3.x);
+    leave OverrideFont empty when that is the case. Never deploy ``arialuni_sdf_game`` (spoof).
+    """
+    game_dir = Path(game_dir)
+    cfg = game_dir / "BepInEx" / "config" / "AutoTranslatorConfig.ini"
+    _delete_spoofed_tmp_font_game_bundle(game_dir, log)
+
+    bundle = ensure_tmp_cjk_font_bundle(game_dir, log)
+    if not bundle:
+        picked = _pick_best_tmp_font_on_disk(game_dir)
+        if picked:
+            bundle = _ensure_game_matched_tmp_font(game_dir, picked, log)
+
+    updates = {
+        # OS font path is broken on this game's IL2CPP — leave empty
+        "OverrideFont": "",
+        "UseTextMeshPro": "True",
+        "UseUGUI": "True",
+        "ForceMonoModHooks": "False",
+        "InitializeHarmonyDetourBridge": "True",
+    }
+    if bundle:
+        updates["OverrideFontTextMeshPro"] = bundle
+        updates["FallbackFontTextMeshPro"] = bundle
+        if log:
+            log(f"XUA TMP 中文字体: OverrideFontTextMeshPro={bundle}")
+    else:
+        updates["OverrideFontTextMeshPro"] = ""
+        updates["FallbackFontTextMeshPro"] = ""
+        if log:
+            log(
+                "未找到 TMP 中文字体包（如 arialuni_sdf_u2019 / arialuni_sdf_u2021）。"
+                "IL2CPP 无法用系统雅黑换字，中文会显示为 □。"
+            )
+
+    if cfg.is_file():
+        patch_autotranslator_ini_keys(cfg, updates)
+
+    try:
+        from app.core.unity_tmp_font_inject import patch_paranormasight_tmp_font
+        from app.core.unity_hazy_text import patch_hazy_localization_glossary
+
+        # Builtin TMP + StreamingAssets MAIN packs (a021/a035/a038…), not gated on a021 alone
+        patch_paranormasight_tmp_font(game_dir, log)
+        try:
+            patch_hazy_localization_glossary(game_dir, log=log)
+        except Exception:
+            pass
+    except Exception as e:
+        if log:
+            log(f"TMP MAIN 字体注入异常（已忽略）: {e}")
+
+    return bundle or ""
+
+
+def disable_broken_bruteforce_fix(game_dir: Path, log: LogFn = None) -> None:
+    """BruteForceFix crashes on newer Il2CppInterop (FindObjectsByType) — disable it."""
+    dll = Path(game_dir) / "BepInEx" / "plugins" / "AutoTranslator.IL2CPP.BruteForceFix.dll"
+    if not dll.is_file():
+        return
+    disabled = dll.with_suffix(".dll.disabled")
+    try:
+        if disabled.exists():
+            dll.unlink()
+        else:
+            dll.rename(disabled)
+        if log:
+            log("已禁用 BruteForceFix（与当前 IL2CPP 不兼容，会导致扫描异常）")
+    except OSError as e:
+        if log:
+            log(f"禁用 BruteForceFix 失败: {e}")
 
 
 def write_autotranslator_config(
@@ -590,8 +994,10 @@ def write_autotranslator_config(
         "FallbackEndpoint": "",
         "Language": lang,
         "FromLanguage": from_lang,
+        # Prefer Harmony(+DetourBridge) on BepInEx IL2CPP; ForceMonoMod-only
+        # leaves TMP unhooked when MonoMod alternates are missing.
         "ForceMonoModHooks": "False",
-        "InitializeHarmonyDetourBridge": "False",
+        "InitializeHarmonyDetourBridge": "True",
         "UseStaticTranslations": "True",
         "UseTextMeshPro": "True",
         "UseUGUI": "True",
@@ -611,6 +1017,11 @@ def write_autotranslator_config(
         "EnableUIResizing": "False",
         "ForceUIResizing": "False",
     }
+    # IL2CPP: OS font override is broken; ensure_xua_cjk_font prefers TMP SDF bundle
+    try:
+        ensure_xua_cjk_font(game_dir, log=None)
+    except Exception:
+        pass
     if harvest:
         updates["Url"] = proxy
         updates["EnableShortDelay"] = "True"
@@ -931,7 +1342,15 @@ def deploy_runtime_inject(
     at_lang = lang_map.get(target_lang, "zh-CN")
 
     ensure_runtime_plugins(game_dir, log)
+    disable_broken_bruteforce_fix(game_dir, log)
     write_autotranslator_config(game_dir, at_lang, source_lang or "ja", mode="offline")
+    try:
+        fn = ensure_xua_cjk_font(game_dir, log)
+        if log:
+            log(f"XUA 中文字体: OverrideFont / FallbackFontTextMeshPro = {fn}")
+    except Exception as e:
+        if log:
+            log(f"XUA 字体配置失败: {e}")
     write_translation_file(game_dir, pairs, at_lang, log, merge=merge_dict)
     write_cn_launcher(game_dir, log, mode="offline")
 
@@ -944,12 +1363,12 @@ def deploy_runtime_inject(
         "1. 用「点我启动_中文汉化_Unity.bat」或直接开游戏 exe\n"
         "2. 译文包：BepInEx\\Translation\\zh-CN\\Text\\GalAutoTL.txt（一键汉化时写好）\n"
         "3. 游玩时不调用 API，只查静态表；词典未覆盖的句子会保持原文\n"
-        "4. 若卡在 Downloading unity base libraries：把版本 zip 放到 BepInEx\\unity-libs\\\n"
-        "5. Alt+R 重载 / Alt+U 手动扫描\n"
-        "6. 台词叠两层/重影：打开 BepInEx\\config\\AutoTranslatorConfig.ini，确认\n"
-        "   GeneratePartialTranslations=False、HandleRichText=False、UseIMGUI=False，\n"
-        "   删掉 Translation\\zh-CN\\Text\\_AutoGeneratedTranslations.txt 后重开游戏\n"
-        "7. 卸载：删除 winhttp.dll、doorstop_config.ini、BepInEx 文件夹\n",
+        "4. 若出现方框□：需要 TMP 字体包 arialuni_sdf_u2021（放到游戏根目录），\n"
+        "   IL2CPP 无法用系统雅黑换字。也可直接用 Steam 官方中文。\n"
+        "5. 若卡在 Downloading unity base libraries：把版本 zip 放到 BepInEx\\unity-libs\\\n"
+        "6. Alt+R 重载 / Alt+U 手动扫描\n"
+        "7. 台词叠两层/重影：确认 GeneratePartialTranslations=False、HandleRichText=False\n"
+        "8. 卸载：删除 winhttp.dll、doorstop_config.ini、BepInEx 文件夹\n",
         encoding="utf-8",
     )
     if log:

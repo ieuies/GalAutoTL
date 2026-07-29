@@ -212,6 +212,9 @@ def collect_typetree_jp_strings(game_dir: Path, log: LogFn = None) -> List[str]:
             if _unity_load:
                 env, _how = _unity_load(fp, game_dir, log)
             else:
+                from app.core.unity_bundle_crypto import configure_unitypy_fallback
+
+                configure_unitypy_fallback(game_dir, log=None)
                 env = UnityPy.load(str(fp))
         except Exception as e:
             if log:

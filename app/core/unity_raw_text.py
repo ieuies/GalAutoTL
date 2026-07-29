@@ -202,7 +202,7 @@ def _unity_load(fp: Path, game_dir: Path, log: LogFn = None):
     from app.core.unity_bundle_crypto import load_unity_env
 
     cache = game_dir / "_galautotl_unity" / "ab_dec"
-    return load_unity_env(fp, cache_dir=cache, log=log)
+    return load_unity_env(fp, cache_dir=cache, log=log, game_dir=Path(game_dir))
 
 
 def _scripts_map(env) -> Dict[int, Tuple[str, str]]:

@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 from typing import Callable, List, Optional, Set
@@ -166,19 +167,41 @@ def collect_il2cpp_string_literals(game_dir: Path, log: LogFn = None) -> List[st
     if log:
         log(f"运行 Il2CppDumper → {work.name} …")
     try:
-        # Non-interactive CLI: exe assembly metadata outdir
-        proc = subprocess.run(
+        # GUI / redirected stdin: Console.ReadKey() crashes Il2CppDumper.
+        # Open a real console briefly, wait until dump files appear, then stop.
+        creationflags = 0
+        if hasattr(subprocess, "CREATE_NEW_CONSOLE"):
+            creationflags = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
+        proc = subprocess.Popen(
             [str(exe), str(ga), str(meta), str(work)],
             cwd=str(exe.parent),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8",
-            errors="replace",
-            input="\n\n\n",  # skip Console.ReadKey pause
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
         )
-        if log and proc.returncode != 0:
-            log(f"Il2CppDumper 退出码 {proc.returncode}: {(proc.stderr or proc.stdout or '')[-400:]}")
+        deadline = time.time() + 300
+        lit_ready = False
+        while time.time() < deadline:
+            if list(work.rglob("stringliteral.json")):
+                # give dumper a moment to flush remaining files
+                time.sleep(1.2)
+                lit_ready = True
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.4)
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            except Exception:
+                pass
+        if log and not lit_ready and proc.returncode not in (0, None):
+            log(f"Il2CppDumper 退出码 {proc.returncode}（若已生成 stringliteral 可忽略）")
     except Exception as e:
         if log:
             log(f"Il2CppDumper 执行失败: {e}")
@@ -204,7 +227,6 @@ def collect_il2cpp_string_literals(game_dir: Path, log: LogFn = None) -> List[st
             dummy = cand
             break
     if dummy:
-        managed = game_dir / "DeadEndCity_Data" / "Managed"
         # only create if no real Managed
         data_dirs = list(game_dir.glob("*_Data"))
         for d in data_dirs:

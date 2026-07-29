@@ -143,23 +143,52 @@ class TranslateCache:
 
 
 def _parse_numbered(raw: str, n: int) -> List[str]:
-    """Parse「编号|译文」. Require leading digits so RealLive '|' name lines are not mis-split."""
+    """Parse「编号|译文」. Require leading digits so RealLive '|' name lines are not mis-split.
+
+    Tolerant of fullwidth punctuation and of models that omit numbers but still
+    emit exactly n non-empty lines.
+    """
     lines: Dict[int, str] = {}
+    ordered: List[str] = []
     for line in (raw or "").splitlines():
         line = line.strip()
         if not line:
             continue
-        m = re.match(r"^(\d+)\s*[|\.、\)]\s*(.*)$", line)
-        if not m:
+        # strip common wrappers
+        if line.startswith("```"):
             continue
-        try:
-            num = int(m.group(1))
-        except ValueError:
+        m = re.match(
+            r"^(\d+)\s*[|｜.\.、．:：\)）]\s*(.*)$",
+            line,
+        )
+        if m:
+            try:
+                num = int(m.group(1))
+            except ValueError:
+                ordered.append(_strip_batch_number_prefix(line))
+                continue
+            body = _strip_batch_number_prefix(m.group(2).strip())
+            lines[num] = body
+            ordered.append(body)
             continue
-        lines[num] = _strip_batch_number_prefix(m.group(2).strip())
+        # bare line (no number) — keep for fallback
+        ordered.append(_strip_batch_number_prefix(line))
+
     if len(lines) >= n and all(lines.get(i + 1) is not None for i in range(n)):
         return [lines[i + 1] for i in range(n)]
-    # incomplete / non-contiguous numbering → fail closed (caller retries per-line)
+    # 0-based numbering
+    if len(lines) >= n and all(lines.get(i) is not None for i in range(n)):
+        return [lines[i] for i in range(n)]
+    # contiguous keys remapped by sorted order
+    if len(lines) == n:
+        keys = sorted(lines)
+        if keys[-1] - keys[0] + 1 == n:
+            return [lines[k] for k in keys]
+    # model dumped n plain lines
+    plain = [x for x in ordered if x]
+    if len(plain) == n:
+        return plain
+    # incomplete / non-contiguous numbering → fail closed (caller retries)
     return []
 
 
@@ -270,12 +299,18 @@ def _translate_ordered_with_context(
 
     total = len(pending_idx)
     done = 0
-    for start in range(0, len(pending_idx), chunk):
+    # Shrink after batch-parse failures (long AdvScript lines confuse models)
+    effective_chunk = max(4, min(chunk or 24, 24))
+    fail_streak = 0
+    if should_cancel:
+        client.cancel_check = should_cancel
+    start = 0
+    while start < len(pending_idx):
         if should_cancel and should_cancel():
             if log:
                 log("已取消")
             break
-        batch_ids = pending_idx[start : start + chunk]
+        batch_ids = pending_idx[start : start + effective_chunk]
         numbered = "\n".join(
             _format_context_item(
                 j,
@@ -288,20 +323,33 @@ def _translate_ordered_with_context(
         user = (
             f"下列{src_label}按游戏出现顺序排列。请结合上文/下文语境，"
             f"只把「本句」精翻为{tgt}中文；占位符原样保留。"
-            f"只输出 编号|本句译文：\n{numbered}"
+            f"必须输出恰好 {len(batch_ids)} 行，格式严格为「编号|本句译文」，"
+            f"编号从 1 到 {len(batch_ids)}，不要漏行、不要合并、不要解释：\n{numbered}"
         )
-        part_texts = [items[i][1] for i in batch_ids]
-        part_prevs = [items[i][0] for i in batch_ids]
         try:
             raw = client.chat(prompt, user)
             parsed = _parse_numbered(raw, len(batch_ids))
             if len(parsed) != len(batch_ids):
-                raise RuntimeError("编号解析条数不匹配")
+                raise RuntimeError(
+                    f"编号解析条数不匹配（解析到 {len(parsed)}/{len(batch_ids)}）"
+                )
+            fail_streak = 0
         except Exception as e:
+            fail_streak += 1
+            # Prefer half-batch before burning N sequential API calls
+            if len(batch_ids) > 4:
+                effective_chunk = max(4, len(batch_ids) // 2)
+                if log:
+                    log(f"上下文批次失败: {e}，缩小批次至 {effective_chunk} 重试…")
+                continue
             if log:
-                log(f"上下文批次失败: {e}，逐条重试…")
+                log(f"上下文批次失败: {e}，逐条重试（进度会逐条跳动）…")
             parsed = []
-            for i in batch_ids:
+            cancelled_mid = False
+            for bi, i in enumerate(batch_ids):
+                if should_cancel and should_cancel():
+                    cancelled_mid = True
+                    break
                 prev, text, nxt = items[i]
                 one_user = (
                     f"结合语境精翻「本句」为{tgt}中文，只输出一句译文。\n"
@@ -316,7 +364,31 @@ def _translate_ordered_with_context(
                     if log:
                         log(f"单条失败，保留原文: {e2}")
                     parsed.append(text)
-                time.sleep(0.12)
+                cur = done + len(parsed)
+                if progress:
+                    progress(cur, max(total, 1))
+                if log and (bi == 0 or (bi + 1) % 3 == 0 or bi + 1 == len(batch_ids)):
+                    log(f"逐条 {bi + 1}/{len(batch_ids)} · 总进度 {cur}/{total}")
+                time.sleep(0.08)
+            if cancelled_mid:
+                while len(parsed) < len(batch_ids):
+                    parsed.append(items[batch_ids[len(parsed)]][1])
+                for i, dst in zip(batch_ids, parsed):
+                    prev, text, _ = items[i]
+                    if not dst:
+                        dst = text
+                    dst = _finalize(dst, False, text, lang, do_polish)
+                    results[i] = dst
+                    if cache and dst != text and not has_glossary_leak(dst):
+                        cache.put(_cache_payload(prev, text), lang, client.model, dst, cache_lang)
+                        cache.put(text, lang, client.model, dst, source_lang)
+                done += len(batch_ids)
+                if progress:
+                    progress(done, max(total, 1))
+                if log:
+                    log("已取消")
+                break
+            effective_chunk = 4
 
         for i, dst in zip(batch_ids, parsed):
             prev, text, _ = items[i]
@@ -324,15 +396,21 @@ def _translate_ordered_with_context(
                 dst = text
             dst = _finalize(dst, False, text, lang, do_polish)
             results[i] = dst
-            # Never cache placeholder debris / 0-collapse — it poisons later runs
             if cache and not has_glossary_leak(dst):
                 cache.put(_cache_payload(prev, text), lang, client.model, dst, cache_lang)
                 cache.put(text, lang, client.model, dst, source_lang)
         done += len(batch_ids)
+        start += len(batch_ids)
         if progress:
             progress(done, max(total, 1))
         if log and total:
             log(f"进度 {done}/{total}")
+        if should_cancel and should_cancel():
+            if log:
+                log("已取消")
+            break
+        if fail_streak == 0 and effective_chunk < (chunk or 24):
+            effective_chunk = min(chunk or 24, effective_chunk + 4)
         time.sleep(0.12)
 
     out: List[str] = []
@@ -398,12 +476,25 @@ def _translate_proper_nouns(
                 log(f"专名批次失败: {e}，逐条重试…")
             parsed = []
             for s in part:
+                if should_cancel and should_cancel():
+                    break
                 try:
                     one = client.chat(prompt, f"只输出该专名的固定中文译名：\n{s}")
                     parsed.append(_strip_batch_number_prefix(one.splitlines()[0].strip()))
                 except Exception:
                     parsed.append(s)
                 time.sleep(0.1)
+            while len(parsed) < len(part):
+                parsed.append(part[len(parsed)])
+            if should_cancel and should_cancel():
+                for src, dst in zip(part, parsed):
+                    dst = (dst or src).strip() or src
+                    out[src] = dst
+                    if cache and dst != src:
+                        cache.put(src, lang, client.model, dst, cache_lang)
+                if log:
+                    log("已取消（专名译名）")
+                break
 
         for src, dst in zip(part, parsed):
             dst = (dst or src).strip() or src
@@ -636,6 +727,7 @@ def translate_batch(
             do_polish,
         )
 
+        cancelled = bool(should_cancel and should_cancel())
         work_src = [texts[i] for i in need_idx]
         work_dst: List[str] = []
         leak_fallback = 0
@@ -656,7 +748,8 @@ def translate_batch(
         if log and leak_fallback:
             log(f"术语占位符损坏 {leak_fallback} 条，已回退原文（避免写入坏句）")
 
-        if gloss:
+        # Skip heavy glossary audit after cancel — user already waited on API
+        if gloss and not cancelled:
             work_dst = enforce_glossary_consistency(work_src, work_dst, gloss)
             notes = verify_glossary_consistency(work_src, work_dst, gloss)
             if notes and log:
@@ -674,7 +767,8 @@ def translate_batch(
                 except Exception:
                     pass
 
-    if root:
+    cancelled = bool(should_cancel and should_cancel())
+    if root and not cancelled:
         try:
             # fill None holes for export
             export_src = [t if t is not None else "" for t in texts]
@@ -692,5 +786,7 @@ def translate_batch(
         except Exception as e:
             if log:
                 log(f"导出对照表失败: {e}")
+    elif cancelled and log:
+        log("已取消：跳过对照表导出与术语全量校验（已译部分仍在缓存，可续跑）")
 
     return results

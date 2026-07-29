@@ -11,3 +11,9 @@
 #   XUnity.AutoTranslator-BepInEx-5.6.1.zip
 #
 # 稳定注入原理：运行时钩子，不修改 data.unity3d，不会把「开始游戏」卡死。
+#
+# TMP 中文字体（可选离线，仓库不收录）：
+#   TMP_Font_AssetBundles.zip / .7z
+#     https://github.com/bbepis/XUnity.AutoTranslator/releases
+#   unity-libs/<Unity短版本>.zip
+#     https://unity.bepinex.dev/libraries/

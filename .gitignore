@@ -20,10 +20,11 @@ _*/
 /_*.py
 /_*.txt
 /_*.json
+/_*.utf8
 /_*.ascii.txt
 lcse_diagnose_samples.txt
 
-# Game workdirs that may appear if someone runs from repo root
+# Game workdirs / translation dumps that may appear if run from repo root
 _galautotl_*/
 cn_scenario/
 cn_bgi_scripts/
@@ -32,10 +33,23 @@ GalAutoTL_remain.txt
 GalAutoTL_image_ui.txt
 GalAutoTL.txt
 GalAutoTL_glossary*.txt
+GalAutoTL_unity_ab_key.txt
+
+# Optional offline Unity runtime blobs (download at runtime or place locally — do not push)
+tools/unity_runtime/**/*.zip
+tools/unity_runtime/**/*.7z
+tools/unity_runtime/**/*.dll
+*.zip
+*.7z
+!tools/unity_runtime/README.md
+!tools/unity_runtime/README.txt
 
 # Local IDE / OS
 .idea/
 .vscode/
+.cursor/**
+!.cursor/rules/
+!.cursor/rules/**
 Thumbs.db
 Desktop.ini
 .DS_Store

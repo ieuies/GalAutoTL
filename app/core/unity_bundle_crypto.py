@@ -34,6 +34,42 @@ _KEY_NAME_CANDIDATES = (
     "ab_key.txt",
 )
 
+_FALLBACK_CONFIGURED: Optional[str] = None
+
+
+def configure_unitypy_fallback(
+    game_dir: Optional[Path] = None,
+    *,
+    version: Optional[str] = None,
+    log: LogFn = None,
+) -> str:
+    """Set UnityPy.config.FALLBACK_UNITY_VERSION so assets without version header load.
+
+    PARANORMASIGHT / many IL2CPP builds fail with:
+    'No valid Unity version found, and the fallback version is not correctly configured.'
+    """
+    global _FALLBACK_CONFIGURED
+    import UnityPy
+    from UnityPy import config as up_config
+
+    ver = (version or "").strip()
+    if not ver and game_dir is not None:
+        try:
+            from app.core.unity_runtime_inject import detect_unity_version
+
+            ver = detect_unity_version(Path(game_dir)) or ""
+        except Exception:
+            ver = ""
+    if not ver:
+        ver = "2021.3.8f1"
+    if _FALLBACK_CONFIGURED == ver:
+        return ver
+    up_config.FALLBACK_UNITY_VERSION = ver
+    _FALLBACK_CONFIGURED = ver
+    if log:
+        log(f"UnityPy FALLBACK_UNITY_VERSION = {ver}")
+    return ver
+
 
 def is_unity_bundle_magic(data: bytes) -> bool:
     if not data or len(data) < 8:
@@ -92,7 +128,16 @@ def try_plain_or_xor_decrypt(data: bytes) -> Tuple[Optional[bytes], str]:
     """Return (decrypted_or_same, method_label)."""
     if is_unity_bundle_magic(data):
         return data, "plain"
+    # Raw SerializedFile (.assets / level*) often starts with 0x00 — XOR vs UnityFS
+    # magic yields a false-positive "UnityFS" header and corrupts the file.
+    if len(data) >= 8 and data[:4] == b"\x00\x00\x00\x00":
+        return None, ""
     for key, lim in recover_xor_candidates(data[:64]):
+        # null plaintext ⇒ keystream == magic; never a real encryptor
+        if key == b"UnityFS\x00" or key.startswith(b"UnityFS"):
+            continue
+        if set(key) <= {0}:
+            continue
         dec = _xor_bytes(data, key, limit=lim)
         if is_unity_bundle_magic(dec):
             label = f"xor key={key.hex()} limit={lim if lim is not None else 'all'}"
@@ -211,6 +256,21 @@ def materialize_decrypted(
     except Exception as e:
         raise RuntimeError(f"无法读取 {path.name}: {e}") from e
 
+    # PARANORMASIGHT etc.: proprietary header then UnityFS
+    ufs = data.find(b"UnityFS")
+    if ufs > 0 and ufs < 4096:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        out = cache_dir / f"{path.stem}_ufs{ufs}{path.suffix or '.bundle'}"
+        hdr = cache_dir / f"{path.stem}_ufs{ufs}.hdr"
+        body = data[ufs:]
+        if not hdr.exists() or hdr.stat().st_size != ufs:
+            hdr.write_bytes(data[:ufs])
+        if not out.exists() or out.stat().st_size != len(body):
+            out.write_bytes(body)
+            if log:
+                log(f"  剥离壳头 {path.name} → UnityFS@{ufs}")
+        return out, f"unityfs-prefix@{ufs}"
+
     if is_unity_bundle_magic(data):
         return path, "plain"
 
@@ -229,22 +289,91 @@ def materialize_decrypted(
     return out, method
 
 
-def load_unity_env(path: Path, *, cache_dir: Optional[Path] = None, log: LogFn = None):
+def shell_prefix_bytes(path: Path, cache_dir: Optional[Path] = None) -> bytes:
+    """Return proprietary bytes before UnityFS (empty if none)."""
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return b""
+    ufs = data.find(b"UnityFS")
+    if ufs > 0 and ufs < 4096:
+        return data[:ufs]
+    if cache_dir:
+        for hdr in Path(cache_dir).glob(f"{path.stem}_ufs*.hdr"):
+            try:
+                return hdr.read_bytes()
+            except OSError:
+                continue
+    return b""
+
+
+def write_shelled_unityfs(
+    dest: Path,
+    unityfs_blob: bytes,
+    *,
+    prefix: bytes = b"",
+    backup: bool = True,
+) -> None:
+    """Write UnityFS payload, re-attaching optional StreamingAssets shell header."""
+    import shutil
+
+    dest = Path(dest)
+    if backup and dest.is_file():
+        bak = Path(str(dest) + ".galautotl.bak")
+        if not bak.exists():
+            shutil.copy2(dest, bak)
+    dest.write_bytes((prefix or b"") + unityfs_blob)
+
+
+def load_unity_env(
+    path: Path,
+    *,
+    cache_dir: Optional[Path] = None,
+    log: LogFn = None,
+    game_dir: Optional[Path] = None,
+):
     """UnityPy.load with XOR preprocess + UnityCN key already set by caller."""
     import UnityPy
 
     path = Path(path)
+    # Infer game root from …/Foo_Data/xxx.assets when not provided
+    root = game_dir
+    if root is None:
+        parent = path.parent
+        if parent.name.endswith("_Data") or parent.name.lower() == "data":
+            root = parent.parent
+        elif parent.parent.name.endswith("_Data"):
+            root = parent.parent.parent
+    try:
+        configure_unitypy_fallback(root, log=log)
+    except Exception:
+        pass
+
     cache = cache_dir or (path.parent / "_galautotl_ab_dec")
     load_path, method = materialize_decrypted(path, cache, log=log)
     try:
         env = UnityPy.load(str(load_path))
         return env, method
     except Exception as e1:
+        # Bad XOR cache (historical false-positive) → retry original file
+        if load_path.resolve() != path.resolve():
+            try:
+                env = UnityPy.load(str(path))
+                if log:
+                    log(f"  解密副本不可用，改用原文件: {path.name}")
+                return env, "plain-fallback"
+            except Exception:
+                pass
         if method != "undecrypted":
             raise
         # last resort: try all XOR candidates even if magic check was strict
         data = path.read_bytes()
         for key, lim in recover_xor_candidates(data[:64])[:12]:
+            if key == b"UnityFS\x00" or key.startswith(b"UnityFS"):
+                continue
+            if len(data) >= 4 and data[:4] == b"\x00\x00\x00\x00":
+                break
             dec = _xor_bytes(data, key, limit=lim)
             if not is_unity_bundle_magic(dec):
                 continue
@@ -299,6 +428,13 @@ def expand_asset_globs(game_dir: Path) -> List[Path]:
                     files.extend(sub.glob(pat))
                 except Exception:
                     continue
+            # PARANORMASIGHT: extensionless a000…a099 (UnityFS after short header)
+            try:
+                for p in sub.iterdir():
+                    if p.is_file() and re.fullmatch(r"a\d{2,4}", p.name, re.I):
+                        files.append(p)
+            except Exception:
+                pass
 
     for pat in pats_top:
         files.extend(game_dir.glob(pat))

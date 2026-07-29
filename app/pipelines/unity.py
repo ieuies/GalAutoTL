@@ -32,6 +32,7 @@ from app.core.translate import TranslateCache
 from app.core.unity_raw_text import apply_mb_units, collect_mb_units, collect_runtime_jp_corpus
 from app.core.il2cpp_stringliteral import collect_il2cpp_string_literals
 from app.core.unity_typetree_text import collect_typetree_jp_strings
+from app.core.unity_hazy_text import collect_hazy_jp_strings, finalize_hazy_after_translate
 from app.core.xua_match_rules import split_glued_game_strings
 from app.pipelines.generic_text import (
     WorkItem,
@@ -230,6 +231,14 @@ def run_unity(
     if not game_dir.is_dir():
         raise FileNotFoundError(f"目录无效: {game_dir}")
 
+    try:
+        from app.core.unity_bundle_crypto import configure_unitypy_fallback
+
+        configure_unitypy_fallback(game_dir, log=log)
+    except Exception as e:
+        if log:
+            log(f"警告: UnityPy 版本回退设置失败: {e}")
+
     work = game_dir / "_galautotl_unity"
     work.mkdir(parents=True, exist_ok=True)
 
@@ -276,6 +285,8 @@ def run_unity(
     lit_rows = collect_il2cpp_string_literals(game_dir, log)
     # 3d) 汉化组标准：TypeTree 结构化读 Card/Hover/TMP 等字段（比盲扫全）
     tt_rows = collect_typetree_jp_strings(game_dir, log)
+    # 3e) PARANORMASIGHT 等：StreamingAssets/a### 壳包里的 Hazy_Script_JP
+    hazy_rows = collect_hazy_jp_strings(game_dir, log)
 
     enable_assets = bool(getattr(cfg, "unity_patch_assets", False))
     enable_meta_write = bool(getattr(cfg, "unity_patch_metadata", False))
@@ -286,6 +297,9 @@ def run_unity(
         )
 
     # Dedupe before API: same line may appear in MB + meta + deep scan
+    # Prefer display-level strings (WindowMessage body) — script shells never match TMP
+    from app.core.xua_display_text import scrub_sources_for_translate
+
     seen_src: set = set()
     unique_sources: List[str] = []
 
@@ -295,14 +309,11 @@ def run_unity(
             return
         # Online tip: split welded GAME OVER / shader tails before translate
         parts = split_glued_game_strings(s) or [s]
-        for p in parts:
+        for p in scrub_sources_for_translate(parts):
             if not p or p in seen_src:
                 continue
             seen_src.add(p)
             unique_sources.append(p)
-        if s not in seen_src:
-            seen_src.add(s)
-            unique_sources.append(s)
 
     for it in items:
         _add_src(it.source)
@@ -316,6 +327,8 @@ def run_unity(
         _add_src(s)
     for s in tt_rows:
         _add_src(s)
+    for s in hazy_rows:
+        _add_src(s)
 
     total = len(unique_sources)
     if total == 0:
@@ -327,7 +340,8 @@ def run_unity(
         log(
             f"待翻译去重合计: {total} "
             f"（明文 {len(items)} + MB {len(mb_units)} + 元数据 {len(meta_units)} "
-            f"+ 深扫 {len(corpus)} + Il2Cpp字面量 {len(lit_rows)} + TypeTree字段 {len(tt_rows)}）"
+            f"+ 深扫 {len(corpus)} + Il2Cpp字面量 {len(lit_rows)} + TypeTree字段 {len(tt_rows)} "
+            f"+ Hazy剧本 {len(hazy_rows)}；已剥离脚本壳/不可见键）"
         )
 
     client = OpenAICompatClient(cfg.api_base, cfg.api_key, cfg.api_model, cfg.temperature)
@@ -352,26 +366,27 @@ def run_unity(
             label="主译",
             remain_filter=remain_filter_set(cfg),
         )
-        if should_cancel and should_cancel():
-            return
-        remain = second_pass_sources(all_sources, mapping, max_n=800, allow=remain_filter_set(cfg))
-        if remain:
-            mapping = run_second_pass(
-                remain,
-                mapping,
-                client,
-                cfg.lang,
-                codec=CODEC_UNICODE,
-                cache=cache,
-                chunk=cfg.batch_size or 24,
-                log=log,
-                progress=progress,
-                should_cancel=should_cancel,
-                source_lang=source_lang,
-                game_dir=cfg.game_dir or cfg.text_dir,
-                do_polish=getattr(cfg, "mt_polish", True),
-                remain_filter=remain_filter_set(cfg),
-            )
+        cancelled = bool(should_cancel and should_cancel())
+        if not cancelled:
+            remain = second_pass_sources(all_sources, mapping, max_n=800, allow=remain_filter_set(cfg))
+            if remain:
+                mapping = run_second_pass(
+                    remain,
+                    mapping,
+                    client,
+                    cfg.lang,
+                    codec=CODEC_UNICODE,
+                    cache=cache,
+                    chunk=cfg.batch_size or 24,
+                    log=log,
+                    progress=progress,
+                    should_cancel=should_cancel,
+                    source_lang=source_lang,
+                    game_dir=cfg.game_dir or cfg.text_dir,
+                    do_polish=getattr(cfg, "mt_polish", True),
+                    remain_filter=remain_filter_set(cfg),
+                )
+            cancelled = bool(should_cancel and should_cancel())
 
         write_remainder_report(
             Path(cfg.game_dir or cfg.text_dir or game_dir),
@@ -425,27 +440,56 @@ def run_unity(
         for s, t in tmap.items():
             if t and t != s and (s, t) not in pairs:
                 pairs.append((s, t))
-        if log:
+        if cancelled and log:
+            log(f"已取消：仍注入已译部分（词典候选 {len(pairs)} 条），未译句保持原文")
+        elif log:
             log(f"开始部署运行时汉化（词典候选 {len(pairs)} 条）…")
+        # Partial cancel: merge so a later full run / resume does not wipe prior CN
         deploy_runtime_inject(
             game_dir,
             pairs,
             target_lang=cfg.lang,
             source_lang=source_lang,
             log=log,
-            merge_dict=remain_filter_set(cfg) is not None,
+            merge_dict=cancelled or remain_filter_set(cfg) is not None,
         )
 
-        if mb_units and enable_assets:
-            if log:
-                log("⚠ 实验性写回 data.unity3d…")
-            apply_mb_units(mb_units, t_mb, log)
-        if meta_units and enable_meta_write:
-            if log:
-                log("⚠ 实验性写回 global-metadata.dat…")
-            apply_meta_units(meta_units, t_meta, log)
+        # PARANORMASIGHT-class Hazy/AdvScript: full post-translate harden
+        # (fill-expand, wait tags, ssei choices, lineno scrub, txtid resync).
+        if hazy_rows and tmap and pairs:
+            try:
+                dict_path = (
+                    game_dir
+                    / "BepInEx"
+                    / "Translation"
+                    / "zh-CN"
+                    / "Text"
+                    / "GalAutoTL.txt"
+                )
+                finalize_hazy_after_translate(
+                    game_dir,
+                    tmap,
+                    dict_path=dict_path if dict_path.is_file() else None,
+                    log=log,
+                )
+            except Exception as e:
+                if log:
+                    log(f"Hazy 写回失败（词典仍可用）: {e}")
+
+        if not cancelled:
+            if mb_units and enable_assets:
+                if log:
+                    log("⚠ 实验性写回 data.unity3d…")
+                apply_mb_units(mb_units, t_mb, log)
+            if meta_units and enable_meta_write:
+                if log:
+                    log("⚠ 实验性写回 global-metadata.dat…")
+                apply_meta_units(meta_units, t_meta, log)
     finally:
         cache.close()
 
     if log:
-        log("Unity 管线完成 — 请用「点我启动_中文汉化_Unity.bat」启动")
+        if should_cancel and should_cancel():
+            log("Unity 已取消并完成部分注入 — 可用启动 bat 试玩；再跑会续译缓存缺口")
+        else:
+            log("Unity 管线完成 — 请用「点我启动_中文汉化_Unity.bat」启动")

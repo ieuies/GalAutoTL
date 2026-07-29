@@ -149,8 +149,14 @@ class Worker(QObject):
 
             if getattr(self.cfg, "auto_copy_font", True):
                 target = self.cfg.game_dir or self.cfg.text_dir
-                if pipe == "unity":
-                    self._log("Unity：跳过自动拷字体（减少干扰）")
+                if pipe == "unity" and target:
+                    try:
+                        from app.core.unity_runtime_inject import ensure_xua_cjk_font
+
+                        fn = ensure_xua_cjk_font(Path(target), self._log)
+                        self._log(f"Unity/XUA 中文字体已配置: {fn}")
+                    except Exception as e:
+                        self._log(f"Unity 字体配置失败: {e}")
                 elif target:
                     ok, tip = copy_cjk_font_to_game(target)
                     self._log(tip if ok else f"字体: {tip}")
@@ -210,6 +216,11 @@ class Worker(QObject):
             # 仅译漏句：跳过全盘润色，避免把未在 remain 里的文件也改一遍
             from app.core.pipeline_harden import remain_filter_set
 
+            if self._cancel:
+                self._log("已取消：跳过收尾润色")
+                self.finished.emit(True, "已取消")
+                return
+
             if (
                 pipe != "polish_only"
                 and getattr(self.cfg, "mt_polish", True)
@@ -256,6 +267,7 @@ class MainWindow(QMainWindow):
         self.cfg = AppConfig.load()
         self._thread: QThread | None = None
         self._worker: Worker | None = None
+        self._cancel_requested = False
         self._fade_anim: QPropertyAnimation | None = None
         self._build_ui()
         self._load_cfg_to_ui()
@@ -984,6 +996,7 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
+        self._cancel_requested = False
         self.progress_bar.setRange(0, 0)  # busy
         self._set_status_chip("汉化中…", "run")
         self.append_log("==== 开始一键汉化 ====")
@@ -1064,13 +1077,27 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def on_cancel(self) -> None:
-        if self._worker:
-            self._worker.request_cancel()
-            self.append_log("正在取消…")
-            self._set_status_chip("正在取消…", "warn")
+        if not self._worker:
+            return
+        if self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self._worker.request_cancel()
+        self.cancel_btn.setEnabled(False)
+        self.append_log(
+            "正在取消…（当前这条 API 请求结束后停；已译部分在缓存里，可下次续跑）"
+        )
+        self._set_status_chip("正在取消…", "warn")
 
     @Slot(int, int)
     def on_progress(self, done: int, total: int) -> None:
+        if self._cancel_requested:
+            self._set_status_chip("正在取消…", "warn")
+            if total > 0:
+                self.progress_bar.setRange(0, total)
+                self.progress_bar.setValue(min(done, total))
+                self.progress_bar.setFormat(f"取消中  {done}/{total}")
+            return
         if total > 0:
             pct = min(100, int(100 * done / total))
             self._set_status_chip(f"{done}/{total} · {pct}%", "run")
@@ -1083,11 +1110,19 @@ class MainWindow(QMainWindow):
 
     @Slot(bool, str)
     def on_finished(self, ok: bool, msg: str) -> None:
+        was_cancel = self._cancel_requested
+        self._cancel_requested = False
         self.start_btn.setEnabled(True)
         self.polish_btn.setEnabled(True)
         self.remain_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress_bar.setRange(0, 100)
+        if was_cancel:
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("已取消")
+            self._set_status_chip("已取消", "warn")
+            self.append_log(f"==== 已取消: {msg} ====")
+            return
         self.progress_bar.setValue(100 if ok else 0)
         self.progress_bar.setFormat("完成" if ok else "失败")
         self._set_status_chip("完成" if ok else "失败", "ok" if ok else "fail")

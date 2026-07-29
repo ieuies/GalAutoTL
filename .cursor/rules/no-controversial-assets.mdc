@@ -1,0 +1,19 @@
+---
+description: Never commit copyright-sensitive or game dump assets to the public repo
+alwaysApply: true
+---
+
+# Do not commit controversial / redistributable-risk assets
+
+When committing or pushing GalAutoTL to GitHub, **never** add:
+
+- `tools/unity_runtime/TMP_Font_AssetBundles.zip` (or `.7z`) — XUA TMP SDF packs based on Arial Unicode–class fonts
+- `tools/unity_runtime/unity-libs/*.zip` — Unity base libraries (use runtime download / local-only cache)
+- BepInEx / XUA / Il2CppDumper binary zips under `tools/cache/` or AppData mirrors
+- Game dumps: `GalAutoTL*.txt`, review/remain tables, Hazy/script exports, `*.galautotl.bak`, AssetBundles, metadata
+- Root scratch: `_urgent_*`, `_emg_*`, `_diag_*`, `_scorecard_*`, `/_*.py`, `/_*.txt`, `/_*.utf8`
+- API keys, `%APPDATA%/GalAutoTL/config.json`, `*.sqlite` translation caches
+
+**OK to commit:** `app/`, `tests/`, docs, `requirements.txt`, READMEs that only link to upstream downloads.
+
+Fonts and unity-libs are **optional offline drop-ins**; the pipeline downloads them at runtime when network works. Do not treat repo copies as required for Unity TL capability.

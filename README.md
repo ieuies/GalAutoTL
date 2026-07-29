@@ -140,9 +140,11 @@ build_exe.bat
 - **稳定注入（默认）**：自动安装 **BepInEx + XUnity.AutoTranslator**，用 AI 译文生成替换表，运行时钩子显示中文（**不改 data.unity3d**）
 - 用「点我启动_中文汉化_Unity.bat」启动
 - 译文表：`BepInEx\Translation\zh-CN\Text\GalAutoTL.txt`
+- **Hazy / AdvScript 类包**（如部分 StreamingAssets `a###`）：采文写回、保留点击等待标签、选项 `ssei`、行号泄漏清理等会在译后自动收尾
 - StreamingAssets 明文（若有）仍会直接写回
 - **加密包 / Addressables**：扫描 `*.bundle` / `aa\` 等；自动尝试 **文件头 XOR** 与 **UnityCN** 密钥；也可放 `GalAutoTL_unity_ab_key.txt`（或环境变量 `GALAUTOTL_UNITY_AB_KEY`）
 - 若曾写坏过包体：用 `data.unity3d.galautotl.bak` 还原
+- **方框 □**：运行时会从 [XUA Releases](https://github.com/bbepis/XUnity.AutoTranslator/releases) 拉取 TMP CJK 字体包（本仓库**不附带**字体文件）；也可自行放到 `tools/unity_runtime/` 离线使用，详见该目录 README
 
 工作目录：`_galautotl_unity\`（含 `ab_dec\` 解密缓存）
 
@@ -195,4 +197,6 @@ build_exe.bat
 ## 注意
 
 - 翻译消耗 API 额度。  
-- 请自行确认版权与使用范围；本工具仅辅助个人汉化学习。
+- 请自行确认游戏版权与使用范围；本工具开源免费，仅辅助个人汉化学习，不附带任何游戏资源或完整汉化包。  
+- 第三方运行时（BepInEx、XUnity.AutoTranslator、Il2CppDumper、TMP 字体包、unity-libs）由程序按需下载或你本地放置；字形等授权以各上游为准，本项目不附带字体许可。  
+- 许可证见仓库根目录 `LICENSE`（MIT）。
