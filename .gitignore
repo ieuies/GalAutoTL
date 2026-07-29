@@ -33,6 +33,7 @@ GalAutoTL_remain.txt
 GalAutoTL_image_ui.txt
 GalAutoTL.txt
 GalAutoTL_glossary*.txt
+GalAutoTL_persona.txt
 GalAutoTL_unity_ab_key.txt
 
 # Optional offline Unity runtime blobs (download at runtime or place locally — do not push)

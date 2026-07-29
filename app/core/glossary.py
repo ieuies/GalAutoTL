@@ -21,6 +21,18 @@ GLOSSARY_NAMES = (
 
 AUTO_GLOSSARY_NAME = "GalAutoTL_glossary_auto.txt"
 CANDIDATE_NAME = "GalAutoTL_glossary_candidates.txt"
+PERSONA_RULES_NAME = "GalAutoTL_persona.txt"
+
+# Built-in default (users override by editing GalAutoTL_persona.txt in the game dir).
+DEFAULT_PERSONA_RULES = (
+    "【默认人设规则 — 中文对白】\n"
+    "1. 日文「彼・彼女」等出现在原文里时，中文叙述/转述用「他/她」，"
+    "不要写成日式「彼/彼女」当面称呼。\n"
+    "2. 角色自称（僕/俺/あたし/私 等）译成自然中文（我/咱/俺…），同一角色前后一致。\n"
+    "3. 对称（君/お前/あなた 等）按关系译成你/您等，避免生硬直译日文称呼腔。\n"
+    "4. 口吻、敬体/常体、口癖贴合角色；人设说明文字不得写进台词。\n"
+    "5. 下方「角色备注」若与本默认冲突，以该角色备注为准。\n"
+)
 
 # Ignore trivial / asset-like "names"
 _SKIP_DST = re.compile(r"^[\s\d\._\-/\\:]+$")
@@ -150,24 +162,63 @@ _KAG_NAME_RE = re.compile(
 
 @dataclass(frozen=True)
 class Glossary:
-    """Ordered SRC→DST map; sources unique, longer keys preferred when matching."""
+    """Ordered SRC→DST map; sources unique, longer keys preferred when matching.
+
+    Optional ``notes`` are prompt-only (gender / speech / persona). They are never
+    masked into placeholders — only shown to the model so pronouns and tone stay
+    consistent. Format is GalAutoTL's own (``SRC=DST ;; note``), not third-party.
+    """
 
     pairs: Tuple[Tuple[str, str], ...]  # longest-src first
+    notes: Tuple[Tuple[str, str], ...] = ()  # src → freeform note
 
     def __bool__(self) -> bool:
-        return bool(self.pairs)
+        return bool(self.pairs) or bool(self.notes)
 
     @property
     def size(self) -> int:
         return len(self.pairs)
 
+    def note_for(self, src: str) -> str:
+        for s, n in self.notes:
+            if s == src:
+                return n
+        return ""
+
     def as_prompt_block(self) -> str:
-        if not self.pairs:
+        if not self.pairs and not self.notes:
             return ""
-        lines = ["【强制术语表 — 仅供参考；引擎会硬替换，模型勿改译名】"]
-        for src, dst in sorted(self.pairs, key=lambda x: (-len(x[0]), x[0])):
-            lines.append(f"  {src} → {dst}")
+        note_map = {s: n for s, n in self.notes}
+        lines: List[str] = []
+        if self.pairs:
+            lines.append("【强制术语 — 译名固定；引擎会硬替换占位符，模型勿另造译名】")
+            for src, dst in sorted(self.pairs, key=lambda x: (-len(x[0]), x[0])):
+                note = (note_map.get(src) or "").strip()
+                if note:
+                    lines.append(f"  {src} → {dst}（{note}）")
+                else:
+                    lines.append(f"  {src} → {dst}")
+        # Notes whose SRC is not in pairs (rare) still guide tone
+        orphan = [(s, n) for s, n in self.notes if s not in {a for a, _ in self.pairs}]
+        if orphan:
+            lines.append("【人设提示 — 无固定译名条目，仅约束人称/语气】")
+            for src, note in sorted(orphan, key=lambda x: x[0]):
+                lines.append(f"  {src}：{note.strip()}")
+        if note_map:
+            lines.append(
+                "【角色备注】以上括号/专条为人设补充；与默认人设规则冲突时以备注为准；"
+                "勿把备注原文写进台词。"
+            )
         return "\n".join(lines)
+
+
+def _split_dst_note(dst_raw: str) -> Tuple[str, str]:
+    """Split ``译文 ;; 人设备注`` (GalAutoTL). Empty note if absent."""
+    raw = (dst_raw or "").strip()
+    if ";;" in raw:
+        dst, note = raw.split(";;", 1)
+        return dst.strip(), note.strip()
+    return raw, ""
 
 
 def _norm_pair(src: str, dst: str) -> Optional[Tuple[str, str]]:
@@ -185,9 +236,16 @@ def _norm_pair(src: str, dst: str) -> Optional[Tuple[str, str]]:
 
 
 def parse_glossary_text(text: str) -> Glossary:
-    """Parse ``SRC=DST`` / ``SRC|DST`` / ``SRC→DST`` / JSON object."""
+    """Parse ``SRC=DST`` / ``SRC|DST`` / ``SRC→DST`` / ``SRC=DST ;; note`` / JSON.
+
+    Persona notes (optional):
+      - ``あや=绫 ;; 女，学生，自称「我」``
+      - ``あや|绫|女，学生，自称「我」`` (three fields)
+    Notes are prompt-only; mask/unmask still uses SRC→DST only.
+    """
     text = text.lstrip("\ufeff")
     mapping: Dict[str, str] = {}
+    notes: Dict[str, str] = {}
 
     stripped = text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
@@ -195,10 +253,21 @@ def parse_glossary_text(text: str) -> Glossary:
             obj = json.loads(stripped)
             if isinstance(obj, dict):
                 for k, v in obj.items():
-                    pair = _norm_pair(str(k), str(v))
+                    if isinstance(v, dict):
+                        pair = _norm_pair(str(k), str(v.get("dst") or v.get("cn") or ""))
+                        if pair:
+                            mapping[pair[0]] = pair[1]
+                        note = str(v.get("note") or v.get("persona") or "").strip()
+                        if note and pair:
+                            notes[pair[0]] = note
+                        continue
+                    dst, note = _split_dst_note(str(v))
+                    pair = _norm_pair(str(k), dst)
                     if pair:
                         mapping[pair[0]] = pair[1]
-                return _freeze(mapping)
+                        if note:
+                            notes[pair[0]] = note
+                return _freeze(mapping, notes)
         except json.JSONDecodeError:
             pass
 
@@ -206,28 +275,58 @@ def parse_glossary_text(text: str) -> Glossary:
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("//") or line.startswith(";"):
             continue
-        src = dst = ""
+        src = dst_raw = ""
         if "→" in line:
-            src, dst = line.split("→", 1)
+            src, dst_raw = line.split("→", 1)
         elif "->" in line:
-            src, dst = line.split("->", 1)
+            src, dst_raw = line.split("->", 1)
         elif "|" in line:
-            src, dst = line.split("|", 1)
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 3:
+                src, dst_raw = parts[0], parts[1]
+                note = "|".join(parts[2:]).strip()
+                pair = _norm_pair(src, dst_raw)
+                if pair:
+                    mapping[pair[0]] = pair[1]
+                    if note:
+                        notes[pair[0]] = note
+                continue
+            src, dst_raw = parts[0], parts[1] if len(parts) > 1 else ""
         elif "=" in line:
-            src, dst = line.split("=", 1)
+            src, dst_raw = line.split("=", 1)
         elif "\t" in line:
-            src, dst = line.split("\t", 1)
+            parts = [p.strip() for p in line.split("\t")]
+            if len(parts) >= 3:
+                src, dst_raw, note = parts[0], parts[1], "\t".join(parts[2:]).strip()
+                pair = _norm_pair(src, dst_raw)
+                if pair:
+                    mapping[pair[0]] = pair[1]
+                    if note:
+                        notes[pair[0]] = note
+                continue
+            src, dst_raw = parts[0], parts[1] if len(parts) > 1 else ""
         else:
             continue
+        dst, note = _split_dst_note(dst_raw)
         pair = _norm_pair(src, dst)
         if pair:
             mapping[pair[0]] = pair[1]
-    return _freeze(mapping)
+            if note:
+                notes[pair[0]] = note
+    return _freeze(mapping, notes)
 
 
-def _freeze(mapping: Dict[str, str]) -> Glossary:
+def _freeze(
+    mapping: Dict[str, str], notes: Optional[Dict[str, str]] = None
+) -> Glossary:
     pairs = tuple(sorted(mapping.items(), key=lambda kv: (-len(kv[0]), kv[0])))
-    return Glossary(pairs=pairs)
+    note_items = tuple(
+        sorted(
+            ((s, n) for s, n in (notes or {}).items() if s and n),
+            key=lambda kv: kv[0],
+        )
+    )
+    return Glossary(pairs=pairs, notes=note_items)
 
 
 def load_glossary(path: Path | str) -> Glossary:
@@ -394,23 +493,107 @@ def enforce_glossary_consistency(
     return out
 
 
+def find_persona_rules_file(game_dir: Optional[Path | str]) -> Optional[Path]:
+    if not game_dir:
+        return None
+    root = Path(game_dir)
+    if not root.is_dir():
+        return None
+    p = root / PERSONA_RULES_NAME
+    return p if p.is_file() else None
+
+
+def _strip_hash_comments(text: str) -> str:
+    lines = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or s.startswith("//") or s.startswith(";"):
+            continue
+        lines.append(raw.rstrip())
+    return "\n".join(lines).strip()
+
+
+def ensure_persona_rules_file(game_dir: Path | str) -> Path:
+    """Create editable default persona rules if missing."""
+    root = Path(game_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / PERSONA_RULES_NAME
+    if path.is_file():
+        return path
+    path.write_text(
+        "# GalAutoTL 人设规则（改此文件即覆盖内置默认；删掉文件则恢复内置）\n"
+        "# 以 # 开头的行为注释，不会送进模型。\n"
+        "#\n"
+        "# 角色专属备注请写在 GalAutoTL_glossary.txt，例如：\n"
+        "#   あや=绫 ;; 女性，自称「我」，对主角用「你」，叙述用「她」\n"
+        "#\n"
+        f"{DEFAULT_PERSONA_RULES}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def load_persona_rules(game_dir: Optional[Path | str]) -> str:
+    """Return persona rules for the system prompt: user file if non-empty, else built-in."""
+    if game_dir:
+        root = Path(game_dir)
+        if root.is_dir():
+            try:
+                ensure_persona_rules_file(root)
+            except Exception:
+                pass
+            path = root / PERSONA_RULES_NAME
+            if path.is_file():
+                try:
+                    body = _strip_hash_comments(
+                        path.read_text(encoding="utf-8", errors="replace")
+                    )
+                    if body:
+                        return body
+                except Exception:
+                    pass
+    return DEFAULT_PERSONA_RULES.strip()
+
+
+def build_glossary_prompt_block(
+    glossary: Optional[Glossary],
+    game_dir: Optional[Path | str] = None,
+) -> str:
+    """Default persona rules + optional character notes / term list."""
+    parts = [load_persona_rules(game_dir)]
+    if glossary:
+        extra = glossary.as_prompt_block()
+        if extra:
+            parts.append(extra)
+    return "\n".join(parts).strip()
+
+
 def write_glossary_template(game_dir: Path | str) -> Path:
     """Create optional manual override file if none exists (auto glossary is primary)."""
     root = Path(game_dir)
     root.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_persona_rules_file(root)
+    except Exception:
+        pass
     existing = find_glossary_file(root)
     if existing:
         return existing
     path = root / "GalAutoTL_glossary.txt"
     path.write_text(
-        "# 可选：手动覆盖自动术语表（原文=译文）\n"
-        "# 不填也没关系——工具会自动抽专名并生成 GalAutoTL_glossary_auto.txt\n"
-        "# 若某个人名自动译得不好，在这里写一行即可覆盖。\n"
+        "# GalAutoTL 手动术语表（原文=译文）\n"
+        "# 不填也行：工具会生成 GalAutoTL_glossary_auto.txt；此处可覆盖某条。\n"
         "#\n"
-        "# 建议（来自实战汉化）：\n"
-        "# - 角色名 / 昵称 / 爱称各写一条（あやねぇ=绫姐，ひなたちゃん=日向酱）\n"
-        "# - 统一用萌百或常用译名，避免同人多名（阳斗/陽斗、诗织/刊）\n"
-        "# - 短选项里的专名也要进表，否则菜单容易机翻跑偏\n"
+        "# 全局人设规则默认在 GalAutoTL_persona.txt（可改）；此处写角色专属备注。\n"
+        "# 基础：\n"
+        "# あや=绫\n"
+        "# ひなたちゃん=日向酱\n"
+        "#\n"
+        "# 角色备注（可选，覆盖/补充默认人设规则）：\n"
+        "# あや=绫 ;; 女性，自称「我」，对主角用「你」，叙述用「她」\n"
+        "# または: あや|绫|女性，自称「我」，对主角用「你」\n"
+        "#\n"
+        "# 建议：角色名/昵称分条写；专名前后一致；短选项里的名字也要进表。\n"
         "#\n",
         encoding="utf-8",
     )
@@ -418,14 +601,18 @@ def write_glossary_template(game_dir: Path | str) -> Path:
 
 
 def merge_glossaries(*glosses: Glossary) -> Glossary:
-    """Later glossaries override earlier ones on the same SRC."""
+    """Later glossaries override earlier ones on the same SRC (pairs and notes)."""
     mapping: Dict[str, str] = {}
+    notes: Dict[str, str] = {}
     for g in glosses:
         if not g:
             continue
         for src, dst in g.pairs:
             mapping[src] = dst
-    return _freeze(mapping)
+        for src, note in g.notes:
+            if note:
+                notes[src] = note
+    return _freeze(mapping, notes)
 
 
 def save_glossary(path: Path | str, glossary: Glossary, header: str = "") -> Path:
@@ -434,8 +621,13 @@ def save_glossary(path: Path | str, glossary: Glossary, header: str = "") -> Pat
     if header:
         for h in header.strip().splitlines():
             lines.append(h if h.startswith("#") else f"# {h}")
+    note_map = {s: n for s, n in glossary.notes}
     for src, dst in sorted(glossary.pairs, key=lambda kv: (-len(kv[0]), kv[0])):
-        lines.append(f"{src}={dst}")
+        note = (note_map.get(src) or "").strip()
+        if note:
+            lines.append(f"{src}={dst} ;; {note}")
+        else:
+            lines.append(f"{src}={dst}")
     p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return p
 

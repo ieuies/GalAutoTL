@@ -53,6 +53,11 @@ py -3 -m pytest tests -q
 
 **按钮怎么用：** 首次用「开始汉化」→ 漏句看 `GalAutoTL_remain.txt` →「仅译漏句」；手改用 `GalAutoTL_review.txt`。不要清 `%APPDATA%\GalAutoTL\cache.sqlite` 后再全量，除非刻意重译。
 
+**译质（人设 / 术语）：**  
+- 默认人设规则内置；首次汉化会在游戏目录生成可改的 `GalAutoTL_persona.txt`（改它即覆盖默认，删掉则恢复内置）。  
+- 角色专属仍写在 `GalAutoTL_glossary.txt`：`あや=绫 ;; 女性，自称「我」，对主角用「你」，叙述用「她」`。  
+- 备注只进提示词，不写进台词；引擎仍按译名硬替换。
+
 打包 EXE（已打入 UnityPy）：
 
 ```bat

@@ -14,6 +14,7 @@ from app.core.cp932_safe import to_cp932_safe
 from app.core.glossary import (
     AUTO_GLOSSARY_NAME,
     Glossary,
+    build_glossary_prompt_block,
     enforce_glossary_consistency,
     glossary_from_mapping,
     harvest_name_candidates,
@@ -84,6 +85,7 @@ def _system_prompt(lang: str, source_lang: str = "auto", glossary_block: str = "
         "7. 若原文已是目标中文，原样输出；\n"
         "8. 原文中的阿拉伯数字、全角数字、拉丁字母、版本号必须原样保留；\n"
         "9. 禁止输出元说明或占位（如「无法识别」「疑似乱码」「按原文输出」「无法翻译」）；\n"
+        "10. 遵守提示中的默认人设规则；有角色备注时以备注为准；勿把人设说明写进译文；\n"
         f"{extra}"
         "输出：批量时严格「编号|本句译文」每行一条，不要解释、不加引号外壳。"
     )
@@ -661,7 +663,7 @@ def translate_batch(
         extra = f"（{source_note}）" if source_note else ""
         log(f"术语表生效 {gloss.size} 条{extra} — 占位符保护专名")
 
-    gloss_block = gloss.as_prompt_block() if gloss else ""
+    gloss_block = build_glossary_prompt_block(gloss, root)
 
     results: List[str] = [""] * len(texts)
     need_idx: List[int] = []

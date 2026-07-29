@@ -68,6 +68,68 @@ def test_sanitize_dst_rejects_unrepairable_leak():
     assert fixed == "今天遇到的两个人"
 
 
+def test_persona_note_parse_and_prompt():
+    from app.core.glossary import parse_glossary_text, merge_glossaries, Glossary
+
+    g = parse_glossary_text(
+        "あや=绫 ;; 女，学生，自称「我」\n"
+        "ひなた|日向|女，幼驯染\n"
+        "普通=普通词\n"
+    )
+    assert g.pairs  # has pairs
+    assert dict(g.pairs)["あや"] == "绫"
+    assert dict(g.pairs)["ひなた"] == "日向"
+    assert g.note_for("あや").startswith("女")
+    assert "自称" in g.note_for("あや")
+    assert "幼驯染" in g.note_for("ひなた")
+    assert g.note_for("普通") == ""
+    block = g.as_prompt_block()
+    assert "あや → 绫（女" in block
+    assert "角色备注" in block
+    # mask still ignores notes
+    masked, keys = mask_glossary_terms("あやが来た", g)
+    assert "⟦GALTL_" in masked
+    assert "女" not in masked
+
+    merged = merge_glossaries(
+        g,
+        Glossary(pairs=(("あや", "绫酱"),), notes=(("あや", "女，语气软"),)),
+    )
+    assert dict(merged.pairs)["あや"] == "绫酱"
+    assert "语气软" in merged.note_for("あや")
+
+
+def test_default_persona_rules_and_user_override(tmp_path: Path):
+    from app.core.glossary import (
+        DEFAULT_PERSONA_RULES,
+        PERSONA_RULES_NAME,
+        build_glossary_prompt_block,
+        load_persona_rules,
+        parse_glossary_text,
+    )
+
+    # no game dir → built-in
+    assert "僕/俺" in load_persona_rules(None) or "自称" in load_persona_rules(None)
+    assert "他/她" in DEFAULT_PERSONA_RULES
+
+    # first load creates editable file with defaults
+    rules = load_persona_rules(tmp_path)
+    assert (tmp_path / PERSONA_RULES_NAME).is_file()
+    assert "对称" in rules or "あなた" in rules
+
+    # user override
+    (tmp_path / PERSONA_RULES_NAME).write_text(
+        "# comment\n【测试覆盖规则】只用咱作自称\n", encoding="utf-8"
+    )
+    assert "只用咱作自称" in load_persona_rules(tmp_path)
+    assert "僕/俺" not in load_persona_rules(tmp_path)
+
+    g = parse_glossary_text("あや=绫 ;; 女性，自称我")
+    block = build_glossary_prompt_block(g, tmp_path)
+    assert "只用咱作自称" in block
+    assert "あや → 绫" in block
+
+
 def test_review_rejects_corrupt_override(tmp_path: Path):
     assert is_corrupt_review_cn("0夏")
     assert is_corrupt_review_cn("{{GALTL0}}")
