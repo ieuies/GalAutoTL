@@ -10,11 +10,11 @@ from app.config import AppConfig, cache_db_path
 from app.core.api_client import OpenAICompatClient
 from app.core.garbro_cli import extract_with_garbro, find_garbro
 from app.core.pipeline_harden import (
-    CODEC_CP932,
     mapping_aligned,
     remain_filter_set,
     run_second_pass,
     second_pass_sources,
+    softpal_codecs_for_lang,
     translate_to_mapping,
     write_remainder_report,
 )
@@ -257,15 +257,17 @@ def run_yuris(
     client = OpenAICompatClient(cfg.api_base, cfg.api_key, cfg.api_model, cfg.temperature)
     tcache = TranslateCache(cache_db_path())
     source_lang = getattr(cfg, "source_lang", "ja") or "ja"
+    # zh → GBK sanitize (keep 简体); non-zh → CP932. Write still tries CP932 then GBK in ystb.
+    _enc, codec = softpal_codecs_for_lang(cfg.lang or "")
     try:
         if log:
-            log("YU-RIS: translate_codec=cp932（YSTB 主编码）")
+            log(f"YU-RIS: translate_codec={codec}（{_enc} 槽；简体勿走 CP932 消毒）")
         sources = [u.source for u in all_units]
         mapping = translate_to_mapping(
             sources,
             client,
             cfg.lang,
-            codec=CODEC_CP932,
+            codec=codec,
             cache=tcache,
             chunk=cfg.batch_size or 24,
             log=log,
@@ -284,7 +286,7 @@ def run_yuris(
                 mapping,
                 client,
                 cfg.lang,
-                codec=CODEC_CP932,
+                codec=codec,
                 cache=tcache,
                 chunk=cfg.batch_size or 24,
                 log=log,

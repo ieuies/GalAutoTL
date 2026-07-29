@@ -46,6 +46,8 @@ def test_expected_translate_codec_table():
     assert expected_translate_codec("kagura") == CODEC_CP932
     assert expected_translate_codec("softpal", "zh_cn") == CODEC_GBK
     assert expected_translate_codec("softpal", "ja") == CODEC_CP932
+    assert expected_translate_codec("yuris", "zh_cn") == CODEC_GBK
+    assert expected_translate_codec("yuris", "ja") == CODEC_CP932
 
 
 def _translate_to_mapping_codec_names(py_file: Path) -> set[str]:
@@ -83,7 +85,6 @@ def _translate_to_mapping_codec_names(py_file: Path) -> set[str]:
         ("lcse", "CODEC_GBK"),
         ("kagura", "CODEC_CP932"),
         ("bgi", "CODEC_CP932"),
-        ("yuris", "CODEC_CP932"),
     ],
 )
 def test_pipeline_passes_codec_via_ast(pipeline: str, const_name: str):
@@ -91,6 +92,16 @@ def test_pipeline_passes_codec_via_ast(pipeline: str, const_name: str):
     path = ROOT / "app" / "pipelines" / f"{pipeline}.py"
     names = _translate_to_mapping_codec_names(path)
     assert const_name in names, f"{pipeline}: codec kwargs={names}"
+
+
+def test_yuris_uses_lang_split_codec_like_softpal():
+    text = (ROOT / "app/pipelines/yuris.py").read_text(encoding="utf-8")
+    assert "softpal_codecs_for_lang" in text
+    assert "codec=codec" in text
+    from app.core.pipeline_harden import expected_translate_codec, CODEC_GBK, CODEC_CP932
+
+    assert expected_translate_codec("yuris", "zh_cn") == CODEC_GBK
+    assert expected_translate_codec("yuris", "ja") == CODEC_CP932
 
 
 def test_softpal_uses_helper_not_inline_only():

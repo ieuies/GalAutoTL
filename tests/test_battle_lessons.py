@@ -275,7 +275,7 @@ def test_kirikiri_pipeline_uses_patch2_not_patch_xp3():
         ("app/pipelines/lcse.py", "CODEC_GBK", True),
         ("app/pipelines/kagura.py", "CODEC_CP932", False),
         ("app/pipelines/bgi.py", "CODEC_CP932", False),
-        ("app/pipelines/yuris.py", "CODEC_CP932", False),
+        ("app/pipelines/yuris.py", "softpal_codecs_for_lang", True),
     ],
 )
 def test_pipeline_codec_routing(rel, must_have, forbid_live_cp932_true):

@@ -3,7 +3,8 @@
 
 Correctness rules (do NOT violate):
   1. Encoding is engine-specific. Never run to_cp932_safe / cp932=True on
-     Unicode engines (Kirikiri UTF-16, Unity UTF-8, Artemis, Sakana, LCSE→GBK).
+     Unicode engines (Kirikiri UTF-16, Unity UTF-8, Artemis, Sakana) or on
+     zh→GBK paths (LCSE, SoftPal/YU-RIS when lang is zh_*).
   2. translate_batch(cp932=..., cache=...) MUST use keyword args only.
   3. Prefer backup-original re-runs; never double-patch dirty binaries blindly.
   4. Do not translate Kirikiri engine/macro/.tjs code for “coverage”.
@@ -27,7 +28,8 @@ CODEC_UNICODE = "unicode"  # UTF-8 / UTF-16-LE — never CP932-mangle
 CODEC_CP932 = "cp932"  # Softpal-JP / Kagura / some BGI
 CODEC_GBK = "gbk"  # LCSE CN display path
 
-# Declared translate codecs per pipeline (tests + softpal helper share this).
+# Declared translate codecs per pipeline (tests + helpers share this).
+# SoftPal / YU-RIS are lang-dependent — see softpal_codecs_for_lang / expected_translate_codec.
 PIPELINE_TRANSLATE_CODEC: Dict[str, str] = {
     "kirikiri": CODEC_UNICODE,
     "unity": CODEC_UNICODE,
@@ -36,14 +38,14 @@ PIPELINE_TRANSLATE_CODEC: Dict[str, str] = {
     "lcse": CODEC_GBK,
     "kagura": CODEC_CP932,
     "bgi": CODEC_CP932,
-    "yuris": CODEC_CP932,
 }
 
 
 def softpal_codecs_for_lang(lang: str) -> tuple[str, str]:
-    """SoftPal: zh → GBK write + GBK sanitize; else CP932.
+    """SoftPal / YU-RIS style slots: zh → GBK write + GBK sanitize; else CP932.
 
     Returns (file_encoding, translate_codec).
+    zh must NOT run to_cp932_safe (会砸简体); write path can still CP932-fallback per engine.
     """
     if (lang or "").startswith("zh"):
         return "gbk", CODEC_GBK
@@ -51,7 +53,7 @@ def softpal_codecs_for_lang(lang: str) -> tuple[str, str]:
 
 
 def expected_translate_codec(pipeline: str, lang: str = "zh_cn") -> str:
-    if pipeline == "softpal":
+    if pipeline in ("softpal", "yuris"):
         return softpal_codecs_for_lang(lang)[1]
     if pipeline == "generic":
         # generic follows UI checkbox; default unicode
