@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 测试是纯逻辑层：只需 pytest + zstandard（app/core/sakana_sx 的传递依赖）。
+          # GUI(PySide6) / UnityPy / TypeTreeGeneratorAPI 由运行时按需安装，CI 不装。
+          python -m pip install pytest zstandard
+
+      - name: Run tests
+        run: python -m pytest tests -q
