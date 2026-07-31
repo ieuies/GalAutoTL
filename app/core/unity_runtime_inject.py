@@ -1439,6 +1439,54 @@ def ensure_runtime_plugins(game_dir: Path, log: LogFn = None) -> str:
     return backend
 
 
+def _verify_runtime_deploy(game_dir: Path, lang: str, log: LogFn = None) -> None:
+    """Post-deploy self-check: warn loudly if the inject didn't actually land.
+
+    Unity 是唯一"写完即完成"的大管线；LCSE/Kirikiri 都有部署后校验。
+    这里补上：译文表 / 配置 / 注入钩子三样缺一即警告，避免用户进游戏才发现没效果。
+    """
+    issues: List[str] = []
+
+    dict_path = game_dir / "BepInEx" / "Translation" / lang / "Text" / "GalAutoTL.txt"
+    if not dict_path.is_file():
+        issues.append(f"译文表缺失: {dict_path.relative_to(game_dir)}")
+    else:
+        try:
+            n_lines = sum(
+                1
+                for ln in dict_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if ln and not ln.startswith("#") and "=" in ln
+            )
+        except OSError:
+            n_lines = 0
+        if n_lines == 0:
+            issues.append(f"译文表为空（0 条词典）: {dict_path.relative_to(game_dir)}")
+
+    cfg_path = game_dir / "BepInEx" / "config" / "AutoTranslatorConfig.ini"
+    if not cfg_path.is_file():
+        issues.append(f"XUA 配置缺失: {cfg_path.relative_to(game_dir)}")
+
+    # BepInEx 注入依赖 winhttp.dll + doorstop_config.ini 位于游戏根（exe 旁）
+    hook = game_dir / "winhttp.dll"
+    doorstop = game_dir / "doorstop_config.ini"
+    if not hook.is_file() or not doorstop.is_file():
+        missing = [p.name for p in (hook, doorstop) if not p.is_file()]
+        issues.append("BepInEx 注入钩子缺失: " + ", ".join(missing) + "（须在游戏根目录、exe 旁）")
+
+    if issues:
+        for msg in issues:
+            if log:
+                log(f"⚠ 自检警告: {msg}")
+        if log:
+            log(
+                "部署自检未通过——请修复后再启动，或查看游戏目录「汉化启动说明_Unity.txt」"
+                "排查。不要直接进游戏（可能仍是日文）。"
+            )
+    else:
+        if log:
+            log("部署自检通过：译文表 / 配置 / 注入钩子均就位")
+
+
 def deploy_runtime_inject(
     game_dir: Path,
     pairs: Sequence[Pair],
@@ -1476,6 +1524,8 @@ def deploy_runtime_inject(
             log(f"XUA 字体配置失败: {e}")
     write_translation_file(game_dir, pairs, at_lang, log, merge=merge_dict)
     write_cn_launcher(game_dir, log, mode="offline")
+
+    _verify_runtime_deploy(game_dir, at_lang, log)
 
     readme = game_dir / "汉化启动说明_Unity.txt"
     readme.write_text(
