@@ -6,7 +6,6 @@ Supports Mono (BepInEx 5) and IL2CPP (BepInEx 6 pre + XUA-IL2CPP).
 """
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import zipfile
@@ -21,6 +20,17 @@ LogFn = Optional[Callable[[str], None]]
 Pair = Tuple[str, str]  # source, translated
 
 XUA_REPO = "bbepis/XUnity.AutoTranslator"
+# XUA version pinned to the build verified in this repo (see tools/unity_runtime/).
+# Dynamic "latest" caused silent behavior drift when upstream bumped versions.
+XUA_VERSION = "5.6.1"
+XUA_MONO_ASSET = f"XUnity.AutoTranslator-BepInEx-{XUA_VERSION}.zip"
+XUA_IL2CPP_ASSET = f"XUnity.AutoTranslator-BepInEx-IL2CPP-{XUA_VERSION}.zip"
+XUA_MONO_URL = (
+    f"https://github.com/{XUA_REPO}/releases/download/v{XUA_VERSION}/" + XUA_MONO_ASSET
+)
+XUA_IL2CPP_URL = (
+    f"https://github.com/{XUA_REPO}/releases/download/v{XUA_VERSION}/" + XUA_IL2CPP_ASSET
+)
 BEPINEX_IL2CPP_ASSET = "BepInEx-Unity.IL2CPP-win-x64-6.0.0-pre.2.zip"
 BEPINEX_IL2CPP_URL = (
     "https://github.com/BepInEx/BepInEx/releases/download/v6.0.0-pre.2/"
@@ -487,17 +497,6 @@ def ensure_unity_base_libs(game_dir: Path, log: LogFn = None) -> Optional[Path]:
             log(f"可手动下载 {url}")
             log(f"放到: {dest}")
         return None
-
-
-def _github_latest_asset_url(repo: str, name_substr: str) -> str:
-    api = f"https://api.github.com/repos/{repo}/releases/latest"
-    req = Request(api, headers={"User-Agent": "GalAutoTL/1.0", "Accept": "application/vnd.github+json"})
-    with urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    for a in data.get("assets") or []:
-        if name_substr in a.get("name", ""):
-            return a["browser_download_url"]
-    raise RuntimeError(f"GitHub {repo} 未找到含 {name_substr!r} 的资源")
 
 
 def _extract_zip(zip_path: Path, game_dir: Path, log: LogFn = None) -> None:
@@ -1403,31 +1402,15 @@ def ensure_runtime_plugins(game_dir: Path, log: LogFn = None) -> str:
     il2cpp = is_il2cpp(game_dir)
     if il2cpp:
         if log:
-            log("检测到 IL2CPP → 安装 BepInEx 6 (Unity.IL2CPP) + AutoTranslator-IL2CPP")
+            log(f"检测到 IL2CPP → 安装 BepInEx 6 (Unity.IL2CPP) + AutoTranslator-IL2CPP v{XUA_VERSION}")
         bep = _download(BEPINEX_IL2CPP_URL, cache / BEPINEX_IL2CPP_ASSET, log)
-        xua_url = _github_latest_asset_url(XUA_REPO, "BepInEx-IL2CPP")
-        xua = _download(xua_url, cache / Path(xua_url).name, log)
+        xua = _download(XUA_IL2CPP_URL, cache / XUA_IL2CPP_ASSET, log)
         backend = "il2cpp"
     else:
         if log:
-            log("检测到 Mono → 安装 BepInEx 5 + AutoTranslator")
+            log(f"检测到 Mono → 安装 BepInEx 5 + AutoTranslator v{XUA_VERSION}")
         bep = _download(BEPINEX_MONO_URL, cache / BEPINEX_MONO_ASSET, log)
-        xua_url = _github_latest_asset_url(XUA_REPO, "BepInEx-5.")
-        # asset name is XUnity.AutoTranslator-BepInEx-5.6.1.zip (not IL2CPP)
-        # fix substr: use exact filter
-        api = "https://api.github.com/repos/bbepis/XUnity.AutoTranslator/releases/latest"
-        req = Request(api, headers={"User-Agent": "GalAutoTL/1.0"})
-        with urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        xua_url = None
-        for a in data["assets"]:
-            n = a["name"]
-            if n.startswith("XUnity.AutoTranslator-BepInEx-") and "IL2CPP" not in n and "Developer" not in n:
-                xua_url = a["browser_download_url"]
-                break
-        if not xua_url:
-            raise RuntimeError("未找到 XUnity.AutoTranslator-BepInEx 包")
-        xua = _download(xua_url, cache / Path(xua_url).name, log)
+        xua = _download(XUA_MONO_URL, cache / XUA_MONO_ASSET, log)
         backend = "mono"
 
     _extract_zip(bep, game_dir, log)
