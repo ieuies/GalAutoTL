@@ -1,0 +1,12 @@
+# Normalize line endings: store LF in the repo, whatever the editor produced.
+# Repo history stores everything as LF (including .bat), so no per-type eol forcing —
+# that would rewrite files that are already clean.
+* text=auto
+
+# Binary / font / icon assets — never line-end normalize
+*.png binary
+*.ico binary
+*.dll binary
+*.zip binary
+*.7z binary
+*.exe binary

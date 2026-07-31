@@ -1,5 +1,6 @@
 PySide6>=6.6.0
 PyInstaller>=6.3.0
 UnityPy>=1.10.0
+TypeTreeGeneratorAPI>=0.0.10
 zstandard>=0.22.0
 pytest>=7.0.0

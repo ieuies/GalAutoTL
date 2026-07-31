@@ -30,6 +30,58 @@ QScrollArea#leftScroll > QWidget > QWidget {
     background: transparent;
 }
 
+/* —— Sidebar navigation —— */
+QFrame#navSide {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1a2433, stop:1 #121a26);
+    border: 1px solid #2a3a4f;
+    border-radius: 18px;
+}
+QLabel#navMark {
+    color: #d4a24c;
+    font-family: "Bahnschrift", "Cascadia Mono", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2.8px;
+}
+QLabel#navBrand {
+    color: #f3eee4;
+    font-family: "Bahnschrift SemiBold", "Bahnschrift", "Yu Gothic UI", sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+    padding-bottom: 4px;
+}
+QLabel#navHint {
+    color: #6d7f96;
+    font-size: 11px;
+    padding-top: 4px;
+}
+QPushButton#navBtn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 11px 12px;
+    color: #9aabbf;
+    font-weight: 600;
+    font-size: 13.5px;
+    text-align: left;
+}
+QPushButton#navBtn:hover {
+    background: rgba(212, 162, 76, 0.08);
+    border-color: #3a4d66;
+    color: #e8dcc8;
+}
+QPushButton#navBtn:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2a2418, stop:1 #1e2a3c);
+    border: 1px solid #6a5428;
+    color: #e0b35c;
+}
+QStackedWidget#pageStack {
+    background: transparent;
+}
+
 QFrame#brandRail {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #1a2433, stop:1 #152032);

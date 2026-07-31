@@ -734,6 +734,33 @@ def glossary_from_mapping(mapping: Dict[str, str]) -> Glossary:
     return _freeze(clean)
 
 
+def format_placeholder_legend(
+    keys: Sequence[str],
+    glossary: Optional[Glossary],
+    *,
+    label: str = "占位对照",
+) -> str:
+    """Per-span map: ⟦GALTL_A⟧ ↔ SRC / DST（note）.
+
+    Placeholders are indexed per string (A = keys[0]). 本句 / 上文 / 下文 each
+    have their own index space — use distinct ``label`` so the model does not
+    confuse the same letter across spans.
+    """
+    if not keys:
+        return ""
+    dst_map = {a: b for a, b in glossary.pairs} if glossary else {}
+    bits: List[str] = []
+    for i, src in enumerate(keys):
+        tok = placeholder_token(i)
+        dst = dst_map.get(src, src)
+        note = (glossary.note_for(src) if glossary else "").strip()
+        if note:
+            bits.append(f"{tok} ↔ {src} / {dst}（{note}）")
+        else:
+            bits.append(f"{tok} ↔ {src} / {dst}")
+    return f"{label}：" + "；".join(bits)
+
+
 def mask_glossary_terms(text: str, glossary: Glossary) -> Tuple[str, List[str]]:
     """Replace glossary SRC with ⟦GALTL_A⟧-style placeholders (longest-first)."""
     if not text or not glossary:

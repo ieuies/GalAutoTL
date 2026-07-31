@@ -99,6 +99,49 @@ def test_persona_note_parse_and_prompt():
     assert "语气软" in merged.note_for("あや")
 
 
+def test_placeholder_legend_maps_token_to_persona():
+    from app.core.glossary import format_placeholder_legend, parse_glossary_text
+    from app.core.translate import _format_context_item, _mask_span
+
+    g = parse_glossary_text(
+        "あや=绫 ;; 女性，自称「我」，叙述用「她」\n"
+        "ひなた=日向\n"
+    )
+    masked, keys = mask_glossary_terms("あやとひなた", g)
+    assert keys == ["あや", "ひなた"]
+    legend = format_placeholder_legend(keys, g, label="本句占位")
+    assert "⟦GALTL_A⟧ ↔ あや / 绫（女性，自称「我」，叙述用「她」）" in legend
+    assert "⟦GALTL_B⟧ ↔ ひなた / 日向" in legend
+    assert legend.startswith("本句占位：")
+    assert format_placeholder_legend([], g) == ""
+
+    prev_m, prev_keys = _mask_span("あやは来た", g)
+    nxt_m, nxt_keys = _mask_span("ひなたもいる", g)
+    pleg = format_placeholder_legend(prev_keys, g, label="上文占位")
+    nleg = format_placeholder_legend(nxt_keys, g, label="下文占位")
+    block = _format_context_item(0, prev_m, masked, nxt_m, legend, pleg, nleg)
+    assert "本句：" in block and masked in block
+    assert "本句占位：" in block
+    assert "上文占位：⟦GALTL_A⟧ ↔ あや / 绫" in block
+    assert "下文占位：⟦GALTL_A⟧ ↔ ひなた / 日向" in block
+    # neighbors must be masked, not raw JP names
+    assert "あやは来た" not in block
+    assert "⟦GALTL_A⟧は来た" in block or "⟦GALTL_A⟧" in prev_m
+
+
+def test_clip_ctx_does_not_split_placeholder():
+    from app.core.glossary import parse_glossary_text
+    from app.core.translate import _clip_ctx, _mask_span
+
+    g = parse_glossary_text("あや=绫")
+    masked, _ = _mask_span(("あ" * 70) + "あやは来た", g)
+    for lim in (60, 75, 80, 82):
+        c = _clip_ctx(masked, lim)
+        if "⟦" in c:
+            assert "⟧" in c, f"split placeholder at limit={lim}: {c!r}"
+        assert "GALTL" not in c or "⟧" in c
+
+
 def test_default_persona_rules_and_user_override(tmp_path: Path):
     from app.core.glossary import (
         DEFAULT_PERSONA_RULES,

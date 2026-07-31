@@ -226,11 +226,28 @@ def runtime_cache_dir() -> Path:
 
 
 def is_il2cpp(game_dir: Path) -> bool:
-    if (game_dir / "GameAssembly.dll").is_file():
-        return True
-    for d in game_dir.glob("*_Data"):
-        if (d / "il2cpp_data" / "Metadata" / "global-metadata.dat").is_file():
+    """Detect IL2CPP even when the UI path is ``xxx_Data`` (not the exe root)."""
+    game_dir = Path(game_dir)
+    checks = [game_dir, game_dir.parent]
+    checks.extend(game_dir.glob("*_Data"))
+    seen: set[Path] = set()
+    for d in checks:
+        try:
+            d = d.resolve()
+        except Exception:
+            d = Path(d)
+        if d in seen:
+            continue
+        seen.add(d)
+        if (d / "GameAssembly.dll").is_file():
             return True
+        meta = d / "il2cpp_data" / "Metadata" / "global-metadata.dat"
+        if meta.is_file():
+            return True
+        # Parent of *_Data
+        if d.name.lower().endswith("_data"):
+            if (d.parent / "GameAssembly.dll").is_file():
+                return True
     return False
 
 
@@ -238,6 +255,77 @@ def is_unity_game(game_dir: Path) -> bool:
     if (game_dir / "UnityPlayer.dll").is_file():
         return True
     return bool(list(game_dir.glob("*_Data")))
+
+
+def resolve_unity_game_root(game_dir: Path) -> Path:
+    """Return the folder that must hold winhttp.dll / BepInEx (next to the game exe).
+
+    Users often pick ``xxx_Data`` in the UI. Doorstop only loads when injected
+    beside ``UnityPlayer.dll`` / the main ``.exe``, not inside ``*_Data``.
+    """
+    game_dir = Path(game_dir).resolve()
+    if (game_dir / "UnityPlayer.dll").is_file() or (game_dir / "GameAssembly.dll").is_file():
+        return game_dir
+    # Selected *_Data (or a subfolder): climb to parent that has the player
+    name = game_dir.name.lower()
+    parent = game_dir.parent
+    if name.endswith("_data") or (game_dir / "data.unity3d").is_file():
+        if (parent / "UnityPlayer.dll").is_file() or (parent / "GameAssembly.dll").is_file():
+            return parent
+        # exe-only layouts
+        if any(parent.glob("*.exe")) and (
+            (parent / "UnityPlayer.dll").is_file()
+            or list(parent.glob("*_Data"))
+        ):
+            return parent
+    # Already a plausible root that contains *_Data
+    if list(game_dir.glob("*_Data")):
+        return game_dir
+    return game_dir
+
+
+def migrate_misplaced_runtime_inject(data_or_root: Path, log: LogFn = None) -> Optional[Path]:
+    """If BepInEx was installed under *_Data, move it next to the exe."""
+    data_or_root = Path(data_or_root)
+    root = resolve_unity_game_root(data_or_root)
+    # Candidate wrong places: path itself if *_Data, or root/*_Data
+    wrongs: list[Path] = []
+    if data_or_root.name.lower().endswith("_data"):
+        wrongs.append(data_or_root)
+    wrongs.extend(sorted(root.glob("*_Data")))
+    moved_any = False
+    for wrong in wrongs:
+        if wrong.resolve() == root.resolve():
+            continue
+        for name in ("winhttp.dll", "doorstop_config.ini", ".doorstop_version"):
+            src = wrong / name
+            dest = root / name
+            if src.is_file() and not dest.exists():
+                shutil.move(str(src), str(dest))
+                moved_any = True
+                if log:
+                    log(f"已迁移注入文件 → {dest.name}（从 {wrong.name}）")
+        src_bep = wrong / "BepInEx"
+        dest_bep = root / "BepInEx"
+        if src_bep.is_dir():
+            if not dest_bep.exists():
+                shutil.move(str(src_bep), str(dest_bep))
+                moved_any = True
+                if log:
+                    log(f"已迁移 BepInEx → 游戏根目录（原在 {wrong.name}）")
+            else:
+                # Merge translation dicts if root already has BepInEx
+                for src in src_bep.rglob("GalAutoTL*.txt"):
+                    rel = src.relative_to(src_bep)
+                    dest = dest_bep / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest.exists() or dest.stat().st_size < src.stat().st_size:
+                        shutil.copy2(src, dest)
+                        moved_any = True
+                        if log:
+                            log(f"已合并词典 → {dest.relative_to(root)}")
+    # Launcher bat may sit under *_Data — recreate on root later via deploy
+    return root
 
 
 def tools_runtime_dir() -> Path:
@@ -717,7 +805,15 @@ def write_xua_helper_files(game_dir: Path, lang: str = "zh-CN", log: LogFn = Non
     text_dir = game_dir / "BepInEx" / "Translation" / lang / "Text"
     text_dir.mkdir(parents=True, exist_ok=True)
     split = text_dir / "GalAutoTL_Splitters.txt"
-    split.write_text(XUA_SPLITTER_RULES.lstrip() + "\n", encoding="utf-8")
+    ver = (detect_unity_version(game_dir) or "").strip()
+    # Complex sr: splitters recurse/NRE on some Unity 2023 IL2CPP + XUA stacks
+    if ver.startswith("2023") or ver.startswith("2024") or ver.startswith("6000"):
+        split.write_text(
+            "# GalAutoTL: splitters disabled on Unity 2023+ (recursion/NRE with XUA)\n",
+            encoding="utf-8",
+        )
+    else:
+        split.write_text(XUA_SPLITTER_RULES.lstrip() + "\n", encoding="utf-8")
     # Preprocessors: normalize before endpoint (also helps static path in some builds)
     pre = text_dir / "_Preprocessors.txt"
     if not pre.is_file() or pre.stat().st_size < 20:
@@ -903,6 +999,12 @@ def ensure_xua_cjk_font(game_dir: Path, log: LogFn = None) -> str:
         if picked:
             bundle = _ensure_game_matched_tmp_font(game_dir, picked, log)
 
+    # Unity 2023.x IL2CPP often cannot LoadAsset TMP font bundles via XUA proxies
+    # (missing Resources.Load / AssetBundle icalls). Forcing OverrideFontTextMeshPro
+    # only spams errors; leave empty and rely on game fonts + static dict.
+    ver = (detect_unity_version(game_dir) or "").strip()
+    unity_2023_plus = ver.startswith("2023") or ver.startswith("6000") or ver.startswith("2024")
+
     updates = {
         # OS font path is broken on this game's IL2CPP — leave empty
         "OverrideFont": "",
@@ -911,7 +1013,7 @@ def ensure_xua_cjk_font(game_dir: Path, log: LogFn = None) -> str:
         "ForceMonoModHooks": "False",
         "InitializeHarmonyDetourBridge": "True",
     }
-    if bundle:
+    if bundle and not unity_2023_plus:
         updates["OverrideFontTextMeshPro"] = bundle
         updates["FallbackFontTextMeshPro"] = bundle
         if log:
@@ -920,10 +1022,16 @@ def ensure_xua_cjk_font(game_dir: Path, log: LogFn = None) -> str:
         updates["OverrideFontTextMeshPro"] = ""
         updates["FallbackFontTextMeshPro"] = ""
         if log:
-            log(
-                "未找到 TMP 中文字体包（如 arialuni_sdf_u2019 / arialuni_sdf_u2021）。"
-                "IL2CPP 无法用系统雅黑换字，中文会显示为 □。"
-            )
+            if unity_2023_plus and bundle:
+                log(
+                    f"Unity {ver or '2023+'}：跳过 TMP 字体包覆写（{bundle}），"
+                    "避免 AssetBundle/icall 报错；词典仍生效"
+                )
+            elif not bundle:
+                log(
+                    "未找到 TMP 中文字体包（如 arialuni_sdf_u2019 / arialuni_sdf_u2021）。"
+                    "IL2CPP 无法用系统雅黑换字，中文可能显示为 □。"
+                )
 
     if cfg.is_file():
         patch_autotranslator_ini_keys(cfg, updates)
@@ -1319,7 +1427,8 @@ def ensure_runtime_plugins(game_dir: Path, log: LogFn = None) -> str:
     _extract_zip(xua, game_dir, log)
     if backend == "il2cpp":
         ensure_unity_base_libs(game_dir, log)
-        ensure_il2cpp_bruteforce_fix(game_dir, log)
+        # BruteForceFix crashes on Unity 2023 + current Il2CppInterop — do not install
+        disable_broken_bruteforce_fix(game_dir, log)
     return backend
 
 
@@ -1334,8 +1443,15 @@ def deploy_runtime_inject(
 ) -> None:
     """Full stable inject: plugins + translation dict + config + launcher."""
     game_dir = Path(game_dir)
-    if not is_unity_game(game_dir):
+    if not is_unity_game(game_dir) and not is_unity_game(resolve_unity_game_root(game_dir)):
         raise RuntimeError("不是 Unity 游戏目录")
+
+    # Doorstop must live next to exe — never only under *_Data
+    scan_dir = game_dir
+    game_dir = resolve_unity_game_root(game_dir)
+    if game_dir.resolve() != Path(scan_dir).resolve() and log:
+        log(f"注入目录纠正为游戏根: {game_dir}（勿装在 *_Data 内）")
+    migrate_misplaced_runtime_inject(scan_dir, log)
 
     # Map cfg lang
     lang_map = {"zh_cn": "zh-CN", "zh_tw": "zh-TW", "zh": "zh-CN"}
@@ -1360,7 +1476,7 @@ def deploy_runtime_inject(
         "==========================\n"
         "方式：BepInEx + XUnity.AutoTranslator（静态词典运行时替换，不改 data.unity3d）\n"
         "\n"
-        "1. 用「点我启动_中文汉化_Unity.bat」或直接开游戏 exe\n"
+        "1. 用「点我启动_中文汉化_Unity.bat」或直接开游戏 exe（注入须在 exe 旁，不能只在 *_Data）\n"
         "2. 译文包：BepInEx\\Translation\\zh-CN\\Text\\GalAutoTL.txt（一键汉化时写好）\n"
         "3. 游玩时不调用 API，只查静态表；词典未覆盖的句子会保持原文\n"
         "4. 若出现方框□：需要 TMP 字体包 arialuni_sdf_u2021（放到游戏根目录），\n"

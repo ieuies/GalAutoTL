@@ -37,10 +37,26 @@ def _exists_any(root: Path, names: list[str]) -> Optional[str]:
     return None
 
 
+def _rglob_limited(root: Path, pattern: str, limit: int = 5) -> List[Path]:
+    """Like rglob, but stop after `limit` hits (list(rglob)[:n] still walks the whole tree)."""
+    out: List[Path] = []
+    try:
+        for p in root.rglob(pattern):
+            out.append(p)
+            if len(out) >= limit:
+                break
+    except OSError:
+        pass
+    return out
+
+
 def _has_lcse(root: Path) -> bool:
     if list(root.glob("lcsebody*")) and list(root.glob("lcsebody*.lst")):
         return True
-    for exe in root.glob("*.exe"):
+    # Cap exe scans — large Steam folders can have dozens of launchers
+    for i, exe in enumerate(root.glob("*.exe")):
+        if i >= 24:
+            break
         try:
             raw = exe.read_bytes()[:2_000_000]
         except Exception:
@@ -119,14 +135,18 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
         if utf.is_dir() and any(utf.glob("*.utf")):
             notes.append(f"已有 UTF 导出: {utf}")
         else:
-            hints.append("需先导出 *.utf（VNTextPatch/rldev）")
+            hints.append("无 export_utf8 时会自动下载 RLDev/kprl 从 SEEN.TXT 导出")
         return DetectResult(
             engine="RealLive / AVG32",
             confidence="high" if (rl_exe and seen) else "medium",
             pipeline="reallive",
             notes=notes,
             hints=hints,
-            workflow="导出 utf → 本工具 RealLive 管线翻译 → patch/repack 写回 SEEN.TXT",
+            workflow=(
+                "① 选含 SEEN.TXT 的游戏根目录\n"
+                "② 开始汉化：自动解包（kprl）→ AI 翻译 → 写出 cn_utf8\n"
+                "③ 有 _tools/full_patch 时可自动写回；否则用导出目录验收"
+            ),
         )
 
     # Kirikiri
@@ -226,7 +246,7 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
 
     # Artemis
     pfs = list(root.glob("*.pfs")) + list(root.glob("root.pfs*"))
-    ast = list(root.rglob("*.ast"))[:5]
+    ast = _rglob_limited(root, "*.ast", 5)
     if pfs or (root / "system.ini").exists() and ast:
         if pfs:
             notes.append("PFS: " + ", ".join(p.name for p in pfs[:6]))
@@ -371,7 +391,7 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
         )
 
     # Ren'Py
-    if (root / "renpy").is_dir() or list(root.rglob("*.rpy"))[:3]:
+    if (root / "renpy").is_dir() or _rglob_limited(root, "*.rpy", 3):
         return DetectResult(
             engine="Ren'Py",
             confidence="high",

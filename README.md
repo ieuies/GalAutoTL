@@ -169,9 +169,10 @@ build_exe.bat
 如 `IsekaiHaremSaver`：解 `SSXXDEFL` 索引 → 解密/解压条目 → AI 译文本 → **槽位夹紧**写回 `.sxstorage`。  
 依赖 `zstandard`。过长译文可能无法塞回原槽（保留日文）。工作目录：`_galautotl_sakana\`
 
-### 古早 RealLive
+### 古早 RealLive — 一键
 
-关掉简单模式 → 管线 RealLive → 指定 `export_utf8` 与外部工具目录。
+选含 `SEEN.TXT` 的游戏根目录即可。无 `_tools/export_utf8` 时会**自动下载 RLDev/kprl** 解包再翻译（Coming×Humming 经验已并入）。  
+译文写到 `_tools/patch_work/cn_utf8`；若 `_tools` 里有 `full_patch.py` 可尝试自动写回。
 
 **译文质量（多引擎通用，Coming×Humming 实战固化）：**
 

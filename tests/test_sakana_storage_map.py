@@ -42,10 +42,15 @@ def test_resolve_ignores_broken_same_size_twin(tmp_path: Path):
 
 def test_sx_arc_md5_offsets_align_with_parse():
     """MD5 patch offsets must land on 16-byte fields for each arc."""
+    import os
+
     from app.core.sakana_sx import find_sx_index, parse_sx_index, _read_sx_index_blob, _sx_arc_md5_offsets
     from pathlib import Path
 
-    bak = Path(r"C:/Users/想吃外星人/Desktop/自动翻译备份/sakana_DangerousVillageTradition")
+    # Optional local dump for integration check; never hardcode machine paths in repo.
+    bak = Path(os.environ.get("GALAUTOTL_SAKANA_FIXTURE", ""))
+    if not bak.is_dir():
+        return
     sx = find_sx_index(bak)
     if not sx:
         return

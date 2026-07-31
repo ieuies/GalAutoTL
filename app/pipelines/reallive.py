@@ -584,15 +584,28 @@ def run_reallive(cfg: AppConfig, log: LogFn = None, progress: ProgressFn = None,
         if cn_dir is None:
             cn_dir = game_dir / "_tools" / "patch_work" / "cn_utf8"
 
-    if jp_dir is None or not jp_dir.is_dir():
-        hint = game_dir / "_tools" / "export_utf8"
+    # Coming×Humming lesson: one-click must auto-export SEEN.TXT via kprl
+    if jp_dir is None or not _dir_has_utf(jp_dir):
+        from app.core.reallive_export import ensure_reallive_utf_dirs, find_seen_txt
+
+        if find_seen_txt(game_dir) is None:
+            hint = game_dir / "_tools" / "export_utf8"
+            raise FileNotFoundError(
+                "未找到 RealLive 剧本（SEEN.TXT 或已导出的 *.utf）。\n"
+                f"游戏: {game_dir}\n"
+                f"若已有导出，请把目录指到: {hint}"
+            )
+        if log:
+            log("未找到 *.utf，自动用 RLDev/kprl 从 SEEN.TXT 导出（首次会下载工具）…")
+        jp_dir, cn_dir = ensure_reallive_utf_dirs(
+            game_dir, cfg.tools_dir, log=log
+        )
+
+    if jp_dir is None or not jp_dir.is_dir() or not _dir_has_utf(jp_dir):
         raise FileNotFoundError(
-            "未找到 RealLive 的 *.utf 导出目录。\n"
-            f"游戏目录: {game_dir}\n"
-            f"预期路径示例: {hint}\n"
-            "请把「文本/UTF目录」设为 export_utf8（含 *.utf），"
-            "或清空该栏让程序在 游戏/_tools 下自动查找，"
-            "也可填写「外部工具目录」。"
+            "RealLive 自动导出后仍无可用 *.utf。\n"
+            f"游戏: {game_dir}\n"
+            "请检查日志中的 kprl 错误，或手动放置 _tools/export_utf8。"
         )
 
     if log:

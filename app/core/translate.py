@@ -16,6 +16,7 @@ from app.core.glossary import (
     Glossary,
     build_glossary_prompt_block,
     enforce_glossary_consistency,
+    format_placeholder_legend,
     glossary_from_mapping,
     harvest_name_candidates,
     has_glossary_leak,
@@ -107,7 +108,14 @@ def _clip_ctx(s: Optional[str], limit: int = 80) -> str:
     t = re.sub(r"\s+", " ", str(s)).strip()
     if len(t) <= limit:
         return t
-    return t[: limit - 1] + "…"
+    # Keep room for ellipsis; never slice through ⟦GALTL_…⟧ (neighbor mask)
+    cut = max(1, limit - 1)
+    open_i = t.rfind("⟦", 0, cut + 1)
+    if open_i >= 0:
+        close_i = t.find("⟧", open_i)
+        if close_i < 0 or close_i >= cut:
+            cut = open_i if open_i > 0 else cut
+    return t[:cut] + "…"
 
 
 class TranslateCache:
@@ -127,18 +135,59 @@ class TranslateCache:
 
     def get(self, text: str, lang: str, model: str, source_lang: str = "auto") -> Optional[str]:
         k = self.key(text, lang, model, source_lang)
-        row = self._conn.execute("SELECT dst FROM cache WHERE key=?", (k,)).fetchone()
-        return row[0] if row else None
+        row = self._conn.execute(
+            "SELECT src, dst FROM cache WHERE key=?", (k,)
+        ).fetchone()
+        if not row:
+            return None
+        src, dst = row[0], row[1]
+        if dst is None:
+            return None
+        d = str(dst).strip()
+        t = str(text or "").strip()
+        s = str(src or "").strip()
+        # Keep-original / failed rows must not count as hits
+        if not d or d == t or (s and d == s):
+            return None
+        # Legacy context keys: src was the full payload, dst wrongly = 本句 JP
+        if s and "\n" in s and s.splitlines()[-1].strip() == d:
+            return None
+        return dst
 
     def put(
-        self, text: str, lang: str, model: str, dst: str, source_lang: str = "auto"
+        self, text: str, lang: str, model: str, dst: str, source_lang: str = "auto",
+        *,
+        src_line: str = "",
     ) -> None:
+        # Never persist keep-original failures (dst equals the real JP line)
+        jp = (src_line or text or "").strip()
+        if not dst or str(dst).strip() == jp or str(dst).strip() == str(text or "").strip():
+            return
         k = self.key(text, lang, model, source_lang)
         self._conn.execute(
             "INSERT OR REPLACE INTO cache(key, src, dst, lang) VALUES (?,?,?,?)",
-            (k, text, dst, lang),
+            (k, jp or text, dst, lang),
         )
         self._conn.commit()
+
+    def purge_identity_rows(self) -> int:
+        """Delete keep-original / legacy context-poison rows."""
+        cur = self._conn.execute("DELETE FROM cache WHERE src IS NOT NULL AND src = dst")
+        n = int(cur.rowcount or 0)
+        # Legacy: src = multi-line context payload, dst wrongly = 本句 JP (last line)
+        doomed: list[str] = []
+        for key, src, dst in self._conn.execute(
+            "SELECT key, src, dst FROM cache WHERE src IS NOT NULL AND dst IS NOT NULL"
+        ):
+            s = str(src)
+            d = str(dst).strip()
+            if "\n" in s and s.splitlines()[-1].strip() == d:
+                doomed.append(key)
+        if doomed:
+            self._conn.executemany("DELETE FROM cache WHERE key=?", [(k,) for k in doomed])
+            n += len(doomed)
+        self._conn.commit()
+        return n
 
     def close(self) -> None:
         self._conn.close()
@@ -243,18 +292,54 @@ def _cache_payload(prev: str, text: str) -> str:
     return f"{p}\n{text}" if p else text
 
 
-def _format_context_item(j: int, prev: str, text: str, nxt: str) -> str:
+# Context item: (prev, text, nxt, text_keys, prev_keys, nxt_keys)
+ContextItem = Tuple[str, str, str, List[str], List[str], List[str]]
+
+
+def _mask_span(text: str, glossary: Optional[Glossary]) -> Tuple[str, List[str]]:
+    if not text or not glossary:
+        return text or "", []
+    return mask_glossary_terms(text, glossary)
+
+
+def _format_context_item(
+    j: int,
+    prev: str,
+    text: str,
+    nxt: str,
+    legend: str = "",
+    prev_legend: str = "",
+    nxt_legend: str = "",
+) -> str:
     parts = [f"{j + 1}."]
     if prev:
         parts.append(f"  上文：{prev}")
+        if prev_legend:
+            parts.append(f"  {prev_legend}")
     parts.append(f"  本句：{text}")
+    if legend:
+        parts.append(f"  {legend}")
     if nxt:
         parts.append(f"  下文：{nxt}")
+        if nxt_legend:
+            parts.append(f"  {nxt_legend}")
     return "\n".join(parts)
 
 
+def _item_legends(
+    item: ContextItem,
+    glossary: Optional[Glossary],
+) -> Tuple[str, str, str]:
+    _prev, _text, _nxt, keys, prev_keys, nxt_keys = item
+    return (
+        format_placeholder_legend(keys, glossary, label="本句占位"),
+        format_placeholder_legend(prev_keys, glossary, label="上文占位"),
+        format_placeholder_legend(nxt_keys, glossary, label="下文占位"),
+    )
+
+
 def _translate_ordered_with_context(
-    items: List[Tuple[str, str, str]],
+    items: List[ContextItem],
     client: OpenAICompatClient,
     lang: str,
     cache: Optional[TranslateCache],
@@ -265,9 +350,11 @@ def _translate_ordered_with_context(
     source_lang: str,
     glossary_block: str,
     do_polish: bool = True,
+    glossary: Optional[Glossary] = None,
 ) -> List[str]:
     """
-    items: list of (prev_ctx, text, next_ctx) in game order.
+    items: (prev, text, next, text_keys, prev_keys, nxt_keys) in game order.
+    Neighbor spans are glossary-masked like 本句 so letter codes stay consistent.
     Returns translations aligned with items.
     """
     if not items:
@@ -280,14 +367,19 @@ def _translate_ordered_with_context(
     results: List[Optional[str]] = [None] * len(items)
     pending_idx: List[int] = []
 
-    for i, (prev, text, _nxt) in enumerate(items):
+    for i, (prev, text, _nxt, _keys, _pk, _nk) in enumerate(items):
         if cache:
             hit = cache.get(_cache_payload(prev, text), lang, client.model, cache_lang)
+            # Context-key rows may store JP as dst while key != JP; still a failed keep-original
+            if hit is not None and str(hit).strip() == str(text).strip():
+                hit = None
             if hit is None:
                 # fallback: same text without context (older cache)
                 hit = cache.get(text, lang, client.model, source_lang)
             if hit is not None and has_glossary_leak(hit):
                 hit = None  # poisoned cache from older placeholder bugs
+            if hit is not None and str(hit).strip() == str(text).strip():
+                hit = None
             if hit is not None:
                 results[i] = hit
                 continue
@@ -301,7 +393,6 @@ def _translate_ordered_with_context(
 
     total = len(pending_idx)
     done = 0
-    # Shrink after batch-parse failures (long AdvScript lines confuse models)
     effective_chunk = max(4, min(chunk or 24, 24))
     fail_streak = 0
     if should_cancel:
@@ -313,18 +404,29 @@ def _translate_ordered_with_context(
                 log("已取消")
             break
         batch_ids = pending_idx[start : start + effective_chunk]
-        numbered = "\n".join(
-            _format_context_item(
-                j,
-                _clip_ctx(items[i][0]),
-                items[i][1],
-                _clip_ctx(items[i][2]),
+        numbered_parts: List[str] = []
+        line_limit = 2000
+        for j, i in enumerate(batch_ids):
+            prev, text, nxt, _k, _pk, _nk = items[i]
+            leg, pleg, nleg = _item_legends(items[i], glossary)
+            body = text if len(text) <= line_limit else _clip_ctx(text, line_limit)
+            numbered_parts.append(
+                _format_context_item(
+                    j,
+                    _clip_ctx(prev, 80),
+                    body,
+                    _clip_ctx(nxt, 80),
+                    leg,
+                    pleg,
+                    nleg,
+                )
             )
-            for j, i in enumerate(batch_ids)
-        )
+        numbered = "\n".join(numbered_parts)
         user = (
             f"下列{src_label}按游戏出现顺序排列。请结合上文/下文语境，"
-            f"只把「本句」精翻为{tgt}中文；占位符原样保留。"
+            f"只把「本句」精翻为{tgt}中文；⟦GALTL_…⟧占位符必须原样保留（勿译成汉字）。"
+            f"「本句/上文/下文占位」各自独立编号；按本句占位与人设处理人称/语气，"
+            f"不要把对照表写进译文。"
             f"必须输出恰好 {len(batch_ids)} 行，格式严格为「编号|本句译文」，"
             f"编号从 1 到 {len(batch_ids)}，不要漏行、不要合并、不要解释：\n{numbered}"
         )
@@ -352,12 +454,19 @@ def _translate_ordered_with_context(
                 if should_cancel and should_cancel():
                     cancelled_mid = True
                     break
-                prev, text, nxt = items[i]
+                prev, text, nxt, keys, prev_keys, nxt_keys = items[i]
+                leg = format_placeholder_legend(keys, glossary, label="本句占位")
+                pleg = format_placeholder_legend(prev_keys, glossary, label="上文占位")
+                nleg = format_placeholder_legend(nxt_keys, glossary, label="下文占位")
+                extra = "；".join(x for x in (leg, pleg, nleg) if x)
+                body = text
                 one_user = (
-                    f"结合语境精翻「本句」为{tgt}中文，只输出一句译文。\n"
-                    f"上文：{_clip_ctx(prev) or '（无）'}\n"
-                    f"本句：{text}\n"
-                    f"下文：{_clip_ctx(nxt) or '（无）'}"
+                    f"结合语境精翻「本句」为{tgt}中文，只输出一句译文；"
+                    f"⟦GALTL_…⟧占位符原样保留"
+                    f"{('；' + extra) if extra else ''}；勿把对照表写入译文。\n"
+                    f"上文：{_clip_ctx(prev, 80) or '（无）'}\n"
+                    f"本句：{body}\n"
+                    f"下文：{_clip_ctx(nxt, 80) or '（无）'}"
                 )
                 try:
                     one = client.chat(prompt, one_user)
@@ -376,14 +485,21 @@ def _translate_ordered_with_context(
                 while len(parsed) < len(batch_ids):
                     parsed.append(items[batch_ids[len(parsed)]][1])
                 for i, dst in zip(batch_ids, parsed):
-                    prev, text, _ = items[i]
+                    prev, text, _, _keys, _pk, _nk = items[i]
                     if not dst:
                         dst = text
                     dst = _finalize(dst, False, text, lang, do_polish)
                     results[i] = dst
                     if cache and dst != text and not has_glossary_leak(dst):
-                        cache.put(_cache_payload(prev, text), lang, client.model, dst, cache_lang)
-                        cache.put(text, lang, client.model, dst, source_lang)
+                        cache.put(
+                            _cache_payload(prev, text),
+                            lang,
+                            client.model,
+                            dst,
+                            cache_lang,
+                            src_line=text,
+                        )
+                        cache.put(text, lang, client.model, dst, source_lang, src_line=text)
                 done += len(batch_ids)
                 if progress:
                     progress(done, max(total, 1))
@@ -393,14 +509,21 @@ def _translate_ordered_with_context(
             effective_chunk = 4
 
         for i, dst in zip(batch_ids, parsed):
-            prev, text, _ = items[i]
+            prev, text, _, _keys, _pk, _nk = items[i]
             if not dst:
                 dst = text
             dst = _finalize(dst, False, text, lang, do_polish)
             results[i] = dst
-            if cache and not has_glossary_leak(dst):
-                cache.put(_cache_payload(prev, text), lang, client.model, dst, cache_lang)
-                cache.put(text, lang, client.model, dst, source_lang)
+            if cache and dst != text and not has_glossary_leak(dst):
+                cache.put(
+                    _cache_payload(prev, text),
+                    lang,
+                    client.model,
+                    dst,
+                    cache_lang,
+                    src_line=text,
+                )
+                cache.put(text, lang, client.model, dst, source_lang, src_line=text)
         done += len(batch_ids)
         start += len(batch_ids)
         if progress:
@@ -416,7 +539,7 @@ def _translate_ordered_with_context(
         time.sleep(0.12)
 
     out: List[str] = []
-    for i, (prev, text, _) in enumerate(items):
+    for i, (_prev, text, _nxt, _keys, _pk, _nk) in enumerate(items):
         dst = results[i]
         out.append(text if dst is None else dst)
     return out
@@ -608,6 +731,13 @@ def translate_batch(
         raise TypeError(
             f"cache 必须是 TranslateCache | None，收到 {type(cache).__name__}"
         )
+    if cache is not None:
+        try:
+            n_bad = cache.purge_identity_rows()
+            if n_bad and log:
+                log(f"已清除 {n_bad} 条「译文=原文」脏缓存，将重新翻译")
+        except Exception:
+            pass
     gloss = glossary
     source_note = ""
     root: Optional[Path] = Path(game_dir) if game_dir else None
@@ -690,6 +820,9 @@ def translate_batch(
             results[i] = t
             continue
         ov = resolve_review_override(i, t, overrides_idx, overrides_src)
+        # Skip review rows that are still 原文 (failed keep-original pollution)
+        if ov is not None and str(ov).strip() == str(t).strip():
+            ov = None
         if ov is not None:
             results[i] = _finalize(ov, cp932, t, lang, do_polish)
             review_hits += 1
@@ -709,11 +842,13 @@ def translate_batch(
         log(f"跳过已是中文 {already_cn_hits} 条（防翻坏）")
 
     if need_idx:
-        items: List[Tuple[str, str, str]] = []
+        items: List[ContextItem] = []
         for i in need_idx:
-            prev, nxt = _neighbor_jp(texts, i)
-            masked, _keys = masked_for_idx[i]
-            items.append((prev, masked, nxt))
+            prev_raw, nxt_raw = _neighbor_jp(texts, i)
+            prev_m, prev_keys = _mask_span(prev_raw, gloss)
+            nxt_m, nxt_keys = _mask_span(nxt_raw, gloss)
+            masked, keys = masked_for_idx[i]
+            items.append((prev_m, masked, nxt_m, keys, prev_keys, nxt_keys))
 
         translated = _translate_ordered_with_context(
             items,
@@ -727,6 +862,7 @@ def translate_batch(
             source_lang,
             gloss_block,
             do_polish,
+            gloss,
         )
 
         cancelled = bool(should_cancel and should_cancel())

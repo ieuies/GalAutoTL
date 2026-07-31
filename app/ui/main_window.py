@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import traceback
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -18,6 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QDesktopServices, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -79,6 +82,7 @@ class Worker(QObject):
     log = Signal(str)
     progress = Signal(int, int)
     finished = Signal(bool, str)
+    engine = Signal(str, str)  # badge text, state
 
     def __init__(self, cfg: AppConfig, pipeline: str) -> None:
         super().__init__()
@@ -120,8 +124,12 @@ class Worker(QObject):
                 )
             remain_mode = pipe == "remain_only"
             if root and force_auto:
+                self._log("正在探测引擎…")
                 det = detect_engine(root)
                 pipe = det.pipeline
+                conf = getattr(det, "confidence", "") or ""
+                state = "ok" if conf in ("high", "medium") else "warn"
+                self.engine.emit(f"{det.engine}  →  {det.pipeline}", state)
                 self._log(det.summary())
                 self._log(f"自动选择管线: {pipe}")
                 if not self.cfg.game_dir:
@@ -293,41 +301,80 @@ class MainWindow(QMainWindow):
         self._fade_anim = anim
         anim.start()
 
+
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("centralRoot")
         self.setCentralWidget(root)
         shell = QHBoxLayout(root)
-        shell.setContentsMargins(20, 20, 20, 20)
-        shell.setSpacing(18)
+        shell.setContentsMargins(14, 14, 14, 14)
+        shell.setSpacing(12)
 
-        # —— Left: controls ——
-        left_wrap = QWidget()
-        left_wrap.setObjectName("leftPane")
-        left_wrap.setMinimumWidth(400)
-        left_wrap.setMaximumWidth(460)
-        left = QVBoxLayout(left_wrap)
-        left.setContentsMargins(0, 2, 0, 2)
-        left.setSpacing(14)
+        # —— Sidebar nav ——
+        side = QFrame()
+        side.setObjectName("navSide")
+        side.setFixedWidth(148)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(10, 14, 10, 12)
+        sl.setSpacing(6)
+        mark = QLabel("GALAUTOTL")
+        mark.setObjectName("navMark")
+        sl.addWidget(mark)
+        brand = QLabel("工作台")
+        brand.setObjectName("navBrand")
+        sl.addWidget(brand)
+        sl.addSpacing(10)
 
+        self._nav_btns: list[QPushButton] = []
+        nav_specs = (
+            ("汉化", "选目录、选项、开始汉化"),
+            ("接口", "云端 API 设置"),
+            ("译质", "对照表、术语、人设"),
+            ("工具", "润色、漏句、字体等"),
+            ("高级", "管线、源语言、编码"),
+        )
+        nav_group = QButtonGroup(self)
+        nav_group.setExclusive(True)
+        for i, (name, tip) in enumerate(nav_specs):
+            b = QPushButton(name)
+            b.setObjectName("navBtn")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda checked=False, idx=i: self._switch_page(idx))
+            nav_group.addButton(b, i)
+            self._nav_btns.append(b)
+            sl.addWidget(b)
+        self._nav_btns[0].setChecked(True)
+        sl.addStretch(1)
+        side_hint = QLabel("日志在右侧")
+        side_hint.setObjectName("navHint")
+        side_hint.setWordWrap(True)
+        sl.addWidget(side_hint)
+        shell.addWidget(side, 0)
+
+        # —— Center pages ——
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("pageStack")
+
+        # Page 0: 汉化
+        page_tl = QWidget()
+        page_tl.setObjectName("leftPane")
+        pl = QVBoxLayout(page_tl)
+        pl.setContentsMargins(4, 2, 4, 2)
+        pl.setSpacing(12)
         hero = QFrame()
         hero.setObjectName("brandRail")
         hl = QVBoxLayout(hero)
-        hl.setContentsMargins(20, 18, 20, 18)
-        hl.setSpacing(4)
-        mark = QLabel("GALAUTOTL")
-        mark.setObjectName("brandMark")
-        title = QLabel("GalAutoTL")
+        hl.setContentsMargins(18, 14, 18, 14)
+        hl.setSpacing(3)
+        title = QLabel("汉化")
         title.setObjectName("brandTitle")
-        sub = QLabel("Galgame 自动汉化工作台")
+        sub = QLabel("选目录 → 识引擎 → 开始")
         sub.setObjectName("brandSub")
-        steps = QLabel("选目录  →  识引擎  →  开始汉化")
-        steps.setObjectName("stepLine")
-        hl.addWidget(mark)
         hl.addWidget(title)
         hl.addWidget(sub)
-        hl.addWidget(steps)
-        left.addWidget(hero)
+        pl.addWidget(hero)
 
         game_card = _card()
         gl = QVBoxLayout(game_card)
@@ -342,39 +389,7 @@ class MainWindow(QMainWindow):
         self.detect_label.setProperty("state", "idle")
         self.detect_label.setWordWrap(True)
         gl.addWidget(self.detect_label)
-        left.addWidget(game_card)
-
-        api_card = _card()
-        al = QVBoxLayout(api_card)
-        al.setContentsMargins(16, 14, 16, 14)
-        al.setSpacing(10)
-        al.addWidget(self._section("API"))
-        self.api_key = QLineEdit()
-        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("DeepSeek / OpenAI 兼容 Key")
-        al.addWidget(self.api_key)
-        api_adv = QWidget()
-        af = QFormLayout(api_adv)
-        af.setContentsMargins(0, 0, 0, 0)
-        af.setSpacing(8)
-        self.api_base = QLineEdit()
-        self.api_model = QLineEdit()
-        self.temp = QDoubleSpinBox()
-        self.temp.setRange(0.0, 1.5)
-        self.temp.setSingleStep(0.1)
-        self.batch = QSpinBox()
-        self.batch.setRange(1, 60)
-        self.api_base_label = QLabel("Base URL")
-        self.api_model_label = QLabel("Model")
-        self.temp_label = QLabel("温度")
-        self.batch_label = QLabel("批大小")
-        af.addRow(self.api_base_label, self.api_base)
-        af.addRow(self.api_model_label, self.api_model)
-        af.addRow(self.temp_label, self.temp)
-        af.addRow(self.batch_label, self.batch)
-        self._api_adv = api_adv
-        al.addWidget(api_adv)
-        left.addWidget(api_card)
+        pl.addWidget(game_card)
 
         opt_card = _card()
         ol = QVBoxLayout(opt_card)
@@ -406,7 +421,7 @@ class MainWindow(QMainWindow):
         ess.addStretch(1)
         ol.addLayout(ess)
         self._ess_row = ess
-        left.addWidget(opt_card)
+        pl.addWidget(opt_card)
 
         act = QHBoxLayout()
         act.setSpacing(10)
@@ -422,50 +437,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self.on_cancel)
         act.addWidget(self.start_btn, 3)
         act.addWidget(self.cancel_btn, 1)
-        left.addLayout(act)
-
-        tools_card = _card()
-        tl = QVBoxLayout(tools_card)
-        tl.setContentsMargins(16, 14, 16, 14)
-        tl.setSpacing(10)
-        tools_cap = QLabel("快捷工具")
-        tools_cap.setObjectName("sectionTitle")
-        tl.addWidget(tools_cap)
-        tools = QGridLayout()
-        tools.setHorizontalSpacing(8)
-        tools.setVerticalSpacing(8)
-        self.save_btn = QPushButton("保存设置")
-        self.open_backup_btn = QPushButton("打开备份")
-        self.review_btn = QPushButton("对照表")
-        self.polish_btn = QPushButton("仅润色")
-        self.remain_btn = QPushButton("仅译漏句")
-        self.image_ui_btn = QPushButton("图片UI清单")
-        self.font_btn = QPushButton("装字体")
-        self.dots_btn = QPushButton("缺字说明")
-        tool_items = (
-            (self.save_btn, "写入本地配置"),
-            (self.open_backup_btn, "打开桌面备份目录"),
-            (self.review_btn, "打开 GalAutoTL_review.txt；改 CN: 后重跑灌回"),
-            (self.polish_btn, "不调用 API，规则润色已有译文"),
-            (self.remain_btn, "读取 GalAutoTL_remain.txt，只翻译仍漏的句子"),
-            (self.image_ui_btn, "扫描 graphic=/图片引用，写出 GalAutoTL_image_ui.txt"),
-            (self.font_btn, "仅复制中文字体到游戏目录"),
-            (self.dots_btn, "关于 CP932 缺字与「・」"),
-        )
-        for i, (b, tip) in enumerate(tool_items):
-            b.setObjectName("ghostBtn")
-            b.setToolTip(tip)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            tools.addWidget(b, i // 3, i % 3)
-        tl.addLayout(tools)
-        self.save_btn.clicked.connect(self.on_save)
-        self.open_backup_btn.clicked.connect(self.on_open_backup)
-        self.review_btn.clicked.connect(self.on_open_review)
-        self.polish_btn.clicked.connect(self.on_polish_only)
-        self.remain_btn.clicked.connect(self.on_remain_only)
-        self.image_ui_btn.clicked.connect(self.on_scan_image_ui)
-        self.font_btn.clicked.connect(self.on_install_font)
-        self.dots_btn.clicked.connect(self.on_explain_dots)
+        pl.addLayout(act)
 
         unity_row = QHBoxLayout()
         unity_row.setSpacing(6)
@@ -485,9 +457,135 @@ class MainWindow(QMainWindow):
         self._unity_tools = QWidget()
         self._unity_tools.setLayout(unity_row)
         self._unity_tools.setVisible(False)
-        tl.addWidget(self._unity_tools)
-        left.addWidget(tools_card)
+        pl.addWidget(self._unity_tools)
+        pl.addStretch(1)
+        self._stack.addWidget(self._wrap_scroll(page_tl))
 
+        # Page 1: 接口
+        page_api = QWidget()
+        page_api.setObjectName("leftPane")
+        al_root = QVBoxLayout(page_api)
+        al_root.setContentsMargins(4, 2, 4, 2)
+        al_root.setSpacing(12)
+        api_card = _card()
+        al = QVBoxLayout(api_card)
+        al.setContentsMargins(16, 14, 16, 14)
+        al.setSpacing(10)
+        al.addWidget(self._section("云端 API"))
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("DeepSeek / OpenAI 兼容 Key")
+        al.addWidget(self.api_key)
+        api_adv = QWidget()
+        af = QFormLayout(api_adv)
+        af.setContentsMargins(0, 0, 0, 0)
+        af.setSpacing(8)
+        self.api_base = QLineEdit()
+        self.api_model = QLineEdit()
+        self.temp = QDoubleSpinBox()
+        self.temp.setRange(0.0, 1.5)
+        self.temp.setSingleStep(0.1)
+        self.batch = QSpinBox()
+        self.batch.setRange(1, 60)
+        self.api_base_label = QLabel("Base URL")
+        self.api_model_label = QLabel("Model")
+        self.temp_label = QLabel("温度")
+        self.batch_label = QLabel("批大小")
+        af.addRow(self.api_base_label, self.api_base)
+        af.addRow(self.api_model_label, self.api_model)
+        af.addRow(self.temp_label, self.temp)
+        af.addRow(self.batch_label, self.batch)
+        self._api_adv = api_adv
+        al.addWidget(api_adv)
+        al_root.addWidget(api_card)
+        al_root.addStretch(1)
+        self._stack.addWidget(self._wrap_scroll(page_api))
+
+        # Page 2: 译质
+        page_q = QWidget()
+        page_q.setObjectName("leftPane")
+        ql = QVBoxLayout(page_q)
+        ql.setContentsMargins(4, 2, 4, 2)
+        ql.setSpacing(12)
+        q_card = _card()
+        qv = QVBoxLayout(q_card)
+        qv.setContentsMargins(16, 14, 16, 14)
+        qv.setSpacing(8)
+        qv.addWidget(self._section("译质文件"))
+        q_hint = QLabel("改完保存后，重新「开始汉化」即可生效 / 灌回。")
+        q_hint.setObjectName("hint")
+        q_hint.setWordWrap(True)
+        qv.addWidget(q_hint)
+        self.review_btn = QPushButton("对照表 GalAutoTL_review.txt")
+        self.glossary_btn = QPushButton("术语表")
+        self.persona_btn = QPushButton("人设规则")
+        for b, tip in (
+            (self.review_btn, "打开对照表；改 CN: 后重跑灌回"),
+            (self.glossary_btn, "手动术语优先，否则自动表；无则创建模板"),
+            (self.persona_btn, "打开/创建 GalAutoTL_persona.txt"),
+        ):
+            b.setObjectName("ghostBtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setMinimumHeight(36)
+            qv.addWidget(b)
+        self.review_btn.clicked.connect(self.on_open_review)
+        self.glossary_btn.clicked.connect(self.on_open_glossary)
+        self.persona_btn.clicked.connect(self.on_open_persona)
+        ql.addWidget(q_card)
+        ql.addStretch(1)
+        self._stack.addWidget(self._wrap_scroll(page_q))
+
+        # Page 3: 工具
+        page_tools = QWidget()
+        page_tools.setObjectName("leftPane")
+        tl_root = QVBoxLayout(page_tools)
+        tl_root.setContentsMargins(4, 2, 4, 2)
+        tl_root.setSpacing(12)
+        tools_card = _card()
+        tv = QVBoxLayout(tools_card)
+        tv.setContentsMargins(16, 14, 16, 14)
+        tv.setSpacing(8)
+        tv.addWidget(self._section("常用工具"))
+        self.save_btn = QPushButton("保存设置")
+        self.open_backup_btn = QPushButton("打开备份")
+        self.polish_btn = QPushButton("仅润色")
+        self.remain_btn = QPushButton("仅译漏句")
+        self.image_ui_btn = QPushButton("图片 UI 清单")
+        self.font_btn = QPushButton("装字体")
+        self.dots_btn = QPushButton("缺字说明")
+        tool_items = (
+            (self.save_btn, "写入本地配置"),
+            (self.open_backup_btn, "打开桌面备份目录"),
+            (self.polish_btn, "不调用 API，规则润色已有译文"),
+            (self.remain_btn, "只翻译 GalAutoTL_remain.txt 里仍漏的句子"),
+            (self.image_ui_btn, "扫描 graphic=/图片引用"),
+            (self.font_btn, "仅复制中文字体到游戏目录"),
+            (self.dots_btn, "关于 CP932 缺字与「・」"),
+        )
+        for b, tip in tool_items:
+            b.setObjectName("ghostBtn")
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setMinimumHeight(34)
+            tv.addWidget(b)
+        self.save_btn.clicked.connect(self.on_save)
+        self.open_backup_btn.clicked.connect(self.on_open_backup)
+        self.polish_btn.clicked.connect(self.on_polish_only)
+        self.remain_btn.clicked.connect(self.on_remain_only)
+        self.image_ui_btn.clicked.connect(self.on_scan_image_ui)
+        self.font_btn.clicked.connect(self.on_install_font)
+        self.dots_btn.clicked.connect(self.on_explain_dots)
+        tl_root.addWidget(tools_card)
+        tl_root.addStretch(1)
+        self._stack.addWidget(self._wrap_scroll(page_tools))
+
+        # Page 4: 高级
+        page_adv = QWidget()
+        page_adv.setObjectName("leftPane")
+        adv_l = QVBoxLayout(page_adv)
+        adv_l.setContentsMargins(4, 2, 4, 2)
+        adv_l.setSpacing(12)
         adv_box = QGroupBox("高级选项")
         self.adv_box = adv_box
         of = QFormLayout(adv_box)
@@ -541,18 +639,17 @@ class MainWindow(QMainWindow):
         self.detect_btn.setObjectName("ghostBtn")
         self.detect_btn.clicked.connect(self.on_detect)
         of.addRow(self.detect_btn)
-        left.addWidget(adv_box)
-        left.addStretch(1)
+        adv_l.addWidget(adv_box)
+        adv_note = QLabel("一键模式开启时，高级页内容会简化隐藏；可在「汉化」页关闭一键模式。")
+        adv_note.setObjectName("hint")
+        adv_note.setWordWrap(True)
+        adv_l.addWidget(adv_note)
+        adv_l.addStretch(1)
+        self._stack.addWidget(self._wrap_scroll(page_adv))
 
-        left_scroll = QScrollArea()
-        left_scroll.setObjectName("leftScroll")
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left_wrap)
-        left_scroll.setMinimumWidth(420)
-        left_scroll.setMaximumWidth(480)
-        shell.addWidget(left_scroll, 0)
+        self._stack.setMinimumWidth(400)
+        self._stack.setMaximumWidth(520)
+        shell.addWidget(self._stack, 0)
 
         # —— Right: console ——
         right = QFrame()
@@ -597,6 +694,22 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.log_view, 1)
         shell.addWidget(right, 1)
 
+    def _wrap_scroll(self, inner: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("leftScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _switch_page(self, idx: int) -> None:
+        if not hasattr(self, "_stack"):
+            return
+        self._stack.setCurrentIndex(idx)
+        for i, b in enumerate(getattr(self, "_nav_btns", [])):
+            b.setChecked(i == idx)
+
     def _section(self, text: str) -> QLabel:
         lab = QLabel(text)
         lab.setObjectName("sectionTitle")
@@ -630,6 +743,8 @@ class MainWindow(QMainWindow):
         simple = self.simple_mode.isChecked()
         self.adv_box.setVisible(not simple)
         self._api_adv.setVisible(not simple)
+        if len(getattr(self, "_nav_btns", [])) > 4:
+            self._nav_btns[4].setEnabled(True)
         if simple:
             self.pipeline.setCurrentIndex(self.pipeline.findData("auto"))
             self.cp932.setChecked(False)
@@ -659,8 +774,6 @@ class MainWindow(QMainWindow):
             old_tools = self.tools_edit.text().strip()
             if old_tools:
                 try:
-                    from pathlib import Path
-
                     gd = Path(d).resolve()
                     td = Path(old_tools).resolve()
                     if gd != td and gd not in td.parents and td not in gd.parents:
@@ -732,8 +845,6 @@ class MainWindow(QMainWindow):
                 self.text_edit.setText(c.game_dir)
             if c.tools_dir and c.game_dir:
                 try:
-                    from pathlib import Path
-
                     gd = Path(c.game_dir).resolve()
                     td = Path(c.tools_dir).resolve()
                     if gd != td and gd not in td.parents and td not in gd.parents:
@@ -759,11 +870,11 @@ class MainWindow(QMainWindow):
             c.auto_copy_font = self.auto_font.isChecked()
             c.do_backup = self.backup.isChecked()
         c.source_lang = self.source_lang.currentData()
+        c.temperature = float(self.temp.value())
+        c.batch_size = int(self.batch.value())
         c.api_base = self.api_base.text().strip() or "https://api.deepseek.com"
         c.api_key = self.api_key.text().strip()
         c.api_model = self.api_model.text().strip() or "deepseek-v4-flash"
-        c.temperature = float(self.temp.value())
-        c.batch_size = int(self.batch.value())
         return c
 
     def append_log(self, msg: str) -> None:
@@ -860,6 +971,53 @@ class MainWindow(QMainWindow):
         self.append_log(
             f"对照表: {path} — 改 CN: 后保存，再点「开始汉化」灌回"
         )
+
+    def _game_root_or_warn(self) -> Optional[Path]:
+        root = self.game_edit.text().strip() or self.text_edit.text().strip()
+        if not root:
+            QMessageBox.warning(self, "缺少目录", "请先选择游戏根目录")
+            return None
+        return Path(root)
+
+    @Slot()
+    def on_open_glossary(self) -> None:
+        from app.core.glossary import (
+            find_auto_glossary_file,
+            find_glossary_file,
+            write_glossary_template,
+        )
+
+        g = self._game_root_or_warn()
+        if not g:
+            return
+        manual = find_glossary_file(g)
+        auto = find_auto_glossary_file(g)
+        if manual:
+            path, kind = manual, "手动"
+        elif auto:
+            path, kind = auto, "自动"
+        else:
+            path = write_glossary_template(g)
+            kind = "模板"
+            self.append_log(f"已创建术语表模板: {path}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        self.append_log(
+            f"术语表({kind}): {path} — 格式 SRC=DST 或 SRC=DST ;; 人设备注"
+        )
+
+    @Slot()
+    def on_open_persona(self) -> None:
+        from app.core.glossary import PERSONA_RULES_NAME, ensure_persona_rules_file
+
+        g = self._game_root_or_warn()
+        if not g:
+            return
+        existed = (g / PERSONA_RULES_NAME).is_file()
+        path = ensure_persona_rules_file(g)
+        if not existed:
+            self.append_log(f"已写入默认人设: {path}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        self.append_log(f"人设规则: {path} — 改后下次汉化生效")
 
     @Slot()
     def on_polish_only(self) -> None:
@@ -975,42 +1133,57 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_start(self) -> None:
         if self._thread and self._thread.isRunning():
+            QMessageBox.information(
+                self,
+                "正在汉化",
+                "当前已有任务在跑。想重来请先点「取消」，等日志提示结束后再开始。",
+            )
             return
-        cfg = self._ui_to_cfg()
-        if not cfg.game_dir and not cfg.text_dir:
-            QMessageBox.warning(self, "缺少目录", "请先选择游戏根目录")
-            return
-        if not cfg.game_dir:
-            cfg.game_dir = cfg.text_dir
-        if not cfg.api_key:
-            QMessageBox.warning(self, "缺少 API Key", "请填写 API Key")
-            return
+        try:
+            cfg = self._ui_to_cfg()
+            if not cfg.game_dir and not cfg.text_dir:
+                QMessageBox.warning(self, "缺少目录", "请先选择游戏根目录")
+                return
+            if not cfg.game_dir:
+                cfg.game_dir = cfg.text_dir
+            if not cfg.api_key:
+                QMessageBox.warning(self, "缺少 API Key", "请填写 API Key")
+                return
 
-        det = detect_engine(cfg.game_dir)
-        self._set_engine_badge(f"{det.engine}  →  {det.pipeline}", "ok")
-        self.append_log(det.summary())
-        if cfg.simple_mode or cfg.pipeline in ("auto", "generic", ""):
-            cfg.pipeline = "auto"
+            if cfg.simple_mode or cfg.pipeline in ("auto", "generic", ""):
+                cfg.pipeline = "auto"
 
-        cfg.save()
-        self.cfg = cfg
-        self.start_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self._cancel_requested = False
-        self.progress_bar.setRange(0, 0)  # busy
-        self._set_status_chip("汉化中…", "run")
-        self.append_log("==== 开始一键汉化 ====")
-        self.append_log(f"游戏: {cfg.game_dir}")
+            # 立刻给反馈：引擎探测放进 Worker 线程，避免大目录 rglob 卡死界面
+            self.append_log("==== 开始一键汉化 ====")
+            self.append_log(f"游戏: {cfg.game_dir}")
+            self.append_log("正在准备（探测引擎 / 检查依赖）…")
+            self._set_status_chip("准备中…", "run")
+            self.progress_bar.setRange(0, 0)
+            self.start_btn.setEnabled(False)
+            self.cancel_btn.setEnabled(True)
+            self._cancel_requested = False
+            QApplication.processEvents()
 
-        self._thread = QThread()
-        self._worker = Worker(cfg, cfg.pipeline)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.log.connect(self.append_log)
-        self._worker.progress.connect(self.on_progress)
-        self._worker.finished.connect(self.on_finished)
-        self._worker.finished.connect(self._thread.quit)
-        self._thread.start()
+            cfg.save()
+            self.cfg = cfg
+
+            self._thread = QThread()
+            self._worker = Worker(cfg, cfg.pipeline)
+            self._worker.moveToThread(self._thread)
+            self._thread.started.connect(self._worker.run)
+            self._worker.log.connect(self.append_log)
+            self._worker.progress.connect(self.on_progress)
+            self._worker.engine.connect(self._set_engine_badge)
+            self._worker.finished.connect(self.on_finished)
+            self._worker.finished.connect(self._thread.quit)
+            self._thread.start()
+        except Exception as e:
+            self.start_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            self.progress_bar.setRange(0, 100)
+            self._set_status_chip("失败", "fail")
+            self.append_log(f"启动失败: {e}")
+            QMessageBox.warning(self, "启动失败", str(e))
 
     @Slot()
     def on_unity_harvest(self) -> None:
@@ -1084,9 +1257,7 @@ class MainWindow(QMainWindow):
         self._cancel_requested = True
         self._worker.request_cancel()
         self.cancel_btn.setEnabled(False)
-        self.append_log(
-            "正在取消…（当前这条 API 请求结束后停；已译部分在缓存里，可下次续跑）"
-        )
+        self.append_log("正在取消…（已译部分在缓存里可续跑）")
         self._set_status_chip("正在取消…", "warn")
 
     @Slot(int, int)
@@ -1144,12 +1315,16 @@ class MainWindow(QMainWindow):
                 "汉化结束。\n"
                 "· 备份在桌面「自动翻译备份」\n"
                 "· 对照表 GalAutoTL_review.txt 可改 CN 后重跑灌回\n"
+                "· 「术语表」「人设规则」可改专名与默认人称规则\n"
                 "· 见游戏目录「汉化启动说明_*.txt」\n"
                 "· 直接启动游戏试玩"
                 + extra,
             )
         else:
             QMessageBox.critical(self, "失败", msg)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        super().closeEvent(event)
 
 
 def run_app() -> int:

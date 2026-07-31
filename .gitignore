@@ -45,6 +45,9 @@ tools/unity_runtime/**/*.dll
 !tools/unity_runtime/README.md
 !tools/unity_runtime/README.txt
 
+# Optional offline KirikiriTools (download at runtime — do not push binaries)
+tools/kirikiri/*.dll
+
 # Local IDE / OS
 .idea/
 .vscode/
