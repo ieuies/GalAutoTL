@@ -60,6 +60,10 @@ class SoftPalScriptBundle:
         self.texts: List[TextEntry] = []
         self.offset_to_id: Dict[int, int] = {}
         self.refs: List[ScriptRef] = []
+        # Orphan TEXT.DAT rows (no show/select ref) get their CN here instead of
+        # overwriting self.texts[].text — that way the JP source is preserved and
+        # a second collect_units()/apply_translations() never re-translates CN.
+        self._orphan_overrides: Dict[int, str] = {}
         self._parse_text()
         self._parse_script()
 
@@ -231,7 +235,9 @@ class SoftPalScriptBundle:
                 ):
                     item["Name"]["Translate"] = mapping[o]
                     n += 1
-        # Orphan TEXT.DAT rows (no show/select ref): mutate in-place for rebuild
+        # Orphan TEXT.DAT rows (no show/select ref): record CN in _orphan_overrides
+        # so rebuild can emit them WITHOUT clobbering the JP source text (a second
+        # collect_units() must keep returning JP, otherwise 二扫 re-translates CN).
         referenced = set()
         for ref in self.refs:
             referenced.add(ref.text_offset)
@@ -242,7 +248,7 @@ class SoftPalScriptBundle:
                 continue
             dst = mapping.get(t.text)
             if dst and dst != t.text and not looks_already_chinese(t.text):
-                t.text = dst
+                self._orphan_overrides[t.offset] = dst
                 n += 1
         self._pending_json = objs
         return n
@@ -264,6 +270,11 @@ class SoftPalScriptBundle:
         texts = [
             TextEntry(t.offset, t.index, t.text, t.raw_body) for t in self.texts
         ]
+        # Apply orphan overrides for writeback (JP source stays intact in texts).
+        for off, cn in self._orphan_overrides.items():
+            tid = self.offset_to_id.get(off)
+            if tid is not None:
+                texts[tid].text = cn
         offset_id = dict(self.offset_to_id)
         modified_ids: List[int] = []
 
