@@ -123,11 +123,52 @@ class TranslateCache:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, src TEXT, dst TEXT, lang TEXT)"
-        )
-        self._conn.commit()
+        self._conn = self._connect_or_rebuild(db_path)
+
+    def _connect_or_rebuild(self, db_path: Path) -> sqlite3.Connection:
+        """Open cache DB; if it is corrupt/locked, quarantine it and start fresh.
+
+        汉化常在中途被关/被杀，SQLite 库可能残留损坏或锁。损坏的库会导致
+        整个工具启动即崩——这里保证缓存坏了也只是丢缓存，绝不拖垮主流程。
+        """
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, src TEXT, dst TEXT, lang TEXT)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_src ON cache(src)"
+            )
+            conn.commit()
+            return conn
+        except sqlite3.Error:
+            # Quarantine the broken file so we never overwrite a recoverable copy,
+            # then recreate a fresh cache. Losing cache is annoying but not fatal.
+            try:
+                self.db_path.replace(self.db_path.with_suffix(".sqlite.bad"))
+            except OSError:
+                pass
+            for sidecar in (Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+                try:
+                    if sidecar.is_file():
+                        sidecar.unlink()
+                except OSError:
+                    pass
+            conn = sqlite3.connect(str(db_path), timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, src TEXT, dst TEXT, lang TEXT)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_src ON cache(src)"
+            )
+            conn.commit()
+            return conn
 
     def key(self, text: str, lang: str, model: str, source_lang: str = "auto") -> str:
         return hashlib.sha256(
