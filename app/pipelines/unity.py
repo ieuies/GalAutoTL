@@ -90,8 +90,9 @@ def _try_unitypy_textassets(
         keys = discover_unity_cn_keys(game_dir)
         if keys:
             apply_unity_cn_keys(keys, log)
-    except Exception:
-        pass
+    except Exception as e:
+        if log:
+            log(f"警告: 应用 UnityCN 密钥失败（加密 bundle 可能无法解密）: {e}")
 
     for fp in find_unity_asset_files(game_dir):
         try:
@@ -237,7 +238,7 @@ def run_unity(
         configure_unitypy_fallback(game_dir, log=log)
     except Exception as e:
         if log:
-            log(f"警告: UnityPy 版本回退设置失败: {e}")
+            log(f"警告: UnityPy 版本回退设置失败（高版本 Unity 包可能读不了）: {e}")
 
     work = game_dir / "_galautotl_unity"
     work.mkdir(parents=True, exist_ok=True)

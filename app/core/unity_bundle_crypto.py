@@ -155,14 +155,14 @@ def parse_key_blob(text: str) -> Optional[bytes]:
         try:
             return bytes.fromhex(hx)
         except ValueError:
-            pass
+            pass  # 不是合法 hex，落到 base64 再试
     # base64
     try:
         raw = base64.b64decode(t, validate=False)
         if 4 <= len(raw) <= 64:
             return raw
     except Exception:
-        pass
+        pass  # 不是合法 base64，落到 utf-8 原文再试
     # utf-8 raw key string (Unity CN often 16 chars)
     b = t.encode("utf-8")
     if 4 <= len(b) <= 64:
@@ -193,6 +193,7 @@ def discover_unity_cn_keys(game_dir: Path) -> List[bytes]:
                 try:
                     add(parse_key_blob(p.read_text(encoding="utf-8", errors="ignore")))
                 except Exception:
+                    # 尽力而为：坏 key 文件不致命，跳过继续找其他来源
                     pass
 
     # light scan of GameAssembly / large dll for printable 16-char keys near decrypt hints
@@ -347,8 +348,9 @@ def load_unity_env(
             root = parent.parent.parent
     try:
         configure_unitypy_fallback(root, log=log)
-    except Exception:
-        pass
+    except Exception as e:
+        if log:
+            log(f"警告: UnityPy 版本回退配置失败: {e}")
 
     cache = cache_dir or (path.parent / "_galautotl_ab_dec")
     load_path, method = materialize_decrypted(path, cache, log=log)
@@ -364,6 +366,7 @@ def load_unity_env(
                     log(f"  解密副本不可用，改用原文件: {path.name}")
                 return env, "plain-fallback"
             except Exception:
+                # 原文件也读不了 → 走下方 XOR 候选暴力恢复，此处继续
                 pass
         if method != "undecrypted":
             raise
@@ -433,7 +436,8 @@ def expand_asset_globs(game_dir: Path) -> List[Path]:
                 for p in sub.iterdir():
                     if p.is_file() and re.fullmatch(r"a\d{2,4}", p.name, re.I):
                         files.append(p)
-            except Exception:
+            except OSError:
+                # 目录读取失败（权限/被占用）——跳过该子目录
                 pass
 
     for pat in pats_top:

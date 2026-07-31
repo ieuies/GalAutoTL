@@ -220,6 +220,7 @@ def load_review_maps(
             ):
                 continue
         except Exception:
+            # 完整性校验失败时保守放行（走 JP/CN 全文匹配兜底）
             pass
         by_idx[num - 1] = (src, dst)
         by_src[src] = dst

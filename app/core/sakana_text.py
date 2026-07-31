@@ -126,7 +126,7 @@ def _decode(data: bytes) -> Tuple[str, str]:
         try:
             return data.decode("utf-16-le"), "utf-16-le"
         except UnicodeDecodeError:
-            pass
+            pass  # 不是合法 UTF-16，落到下方 cp932/utf-8 探测
     for enc in ("utf-8", "cp932"):
         try:
             return data.decode(enc), enc
@@ -265,6 +265,7 @@ def apply_sakana_units(root: Path, units: List[SakanaUnit], translated: List[str
                     try:
                         _set_json_path(obj, str(u.meta), t)
                     except Exception:
+                        # 单个 JSON 路径写失败不阻塞整条；其余路径继续
                         pass
                 text = json.dumps(obj, ensure_ascii=False, indent=2)
                 if data.endswith(b"\n"):

@@ -70,6 +70,7 @@ def _system_prompt(lang: str, source_lang: str = "auto", glossary_block: str = "
 
         extra = polish_prompt_rules(lang)
     except Exception:
+        # 人设/润色提示词规则加载失败 → 用基础提示词继续，不阻塞翻译
         pass
     return (
         "你是资深游戏 / Galgame / 视觉小说汉化译者，进行对照原文的精翻（不是机翻糊弄）。\n"
@@ -256,6 +257,7 @@ def _finalize(
 
             dst = preserve_arabic_digits(src, dst)
         except Exception:
+            # 数字保留是增强项，失败则保留当前译文（可能有数字被译成中文数词）
             pass
         try:
             from app.core.kirikiri_patch import is_poison_translation
@@ -272,6 +274,7 @@ def _finalize(
 
             dst = polish_mt_text(dst, lang=lang or "zh_cn", soft_cp932=False, src=src or "")
         except Exception:
+            # 润色是增强项；失败保留机翻原文，不阻塞写回
             pass
     if cp932:
         dst = to_cp932_safe(dst)
@@ -283,6 +286,7 @@ def _finalize(
                     dst, lang=lang or "zh_cn", soft_cp932=True, src=src or ""
                 )
             except Exception:
+                # 同上：润色失败保留 CP932 安全化后的译文
                 pass
     return dst
 
@@ -649,6 +653,7 @@ def _build_auto_glossary(
     try:
         write_candidates_file(game_dir, cands)
     except Exception:
+        # 候选词文件是辅助产物，写失败不阻塞翻译流程
         pass
 
     if not cands and not existing:
@@ -737,6 +742,7 @@ def translate_batch(
             if n_bad and log:
                 log(f"已清除 {n_bad} 条「译文=原文」脏缓存，将重新翻译")
         except Exception:
+            # 清理失败不阻塞翻译；下次运行会再尝试
             pass
     gloss = glossary
     source_note = ""
@@ -778,8 +784,9 @@ def translate_batch(
 
         # 拟声硬替换优先于模型，避免「粗糙」类误译；手动术语表仍可覆盖同 SRC
         gloss = merge_glossaries(builtin_sfx_glossary(), gloss)
-    except Exception:
-        pass
+    except Exception as e:
+        if log:
+            log(f"警告: 内置拟声术语表加载失败（拟声词可能机翻腔）: {e}")
 
     overrides_idx, overrides_src = load_review_maps(root) if root else ({}, {})
     if log and (overrides_idx or overrides_src):
@@ -903,6 +910,7 @@ def translate_batch(
                 try:
                     cache.put(src, lang, client.model, dst, source_lang)
                 except Exception:
+                    # 缓存写失败不影响本次译文；下次运行会重新翻译该句
                     pass
 
     cancelled = bool(should_cancel and should_cancel())

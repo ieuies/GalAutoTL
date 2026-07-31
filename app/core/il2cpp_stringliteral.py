@@ -199,7 +199,7 @@ def collect_il2cpp_string_literals(game_dir: Path, log: LogFn = None) -> List[st
                 except subprocess.TimeoutExpired:
                     proc.kill()
             except Exception:
-                pass
+                pass  # 子进程已退出或清理失败，忽略
         if log and not lit_ready and proc.returncode not in (0, None):
             log(f"Il2CppDumper 退出码 {proc.returncode}（若已生成 stringliteral 可忽略）")
     except Exception as e:
@@ -237,6 +237,7 @@ def collect_il2cpp_string_literals(game_dir: Path, log: LogFn = None) -> List[st
                     if log:
                         log(f"已放置 DummyDll → {m.relative_to(game_dir)}（供 AssetStudio/UABEA）")
                 except Exception:
+                    # DummyDll 只是外部工具提示，复制失败不影响主线汉化
                     pass
             break
     return rows

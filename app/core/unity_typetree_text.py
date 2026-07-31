@@ -137,6 +137,7 @@ def _make_generator(game_dir: Path, log: LogFn = None):
                 try:
                     n = len(gen.get_loaded_dll_names())
                 except Exception:
+                    # 只是统计展示用的 DLL 数，失败显示 0 即可
                     pass
                 log(f"TypeTreeGenerator OK（{backend} / Unity {ver}，DLL≈{n}）")
             return gen

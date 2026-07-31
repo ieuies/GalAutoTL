@@ -435,6 +435,7 @@ def _download(url: str, dest: Path, log: LogFn = None, *, min_size: int = 100_00
                 if not tools_copy.is_file() or tools_copy.stat().st_size != dest.stat().st_size:
                     shutil.copy2(dest, tools_copy)
             except OSError:
+                # 镜像副本写不进（只读目录/磁盘满）——下载本体已成功，不影响功能
                 pass
             return dest
         except Exception as e:
@@ -747,6 +748,7 @@ def write_translation_file(
                     lines.append(f"{k}={v}")
                     n += 1
         except OSError:
+            # 读不了现有词典文件——跳过合并，直接覆盖写入
             pass
 
     from app.core.il2cpp_stringliteral import harvest_pua_icons
@@ -974,6 +976,7 @@ def ensure_tmp_cjk_font_bundle(game_dir: Path, log: LogFn = None) -> Optional[st
     try:
         shutil.copy2(chosen, fonts_dir / chosen_name)
     except OSError:
+        # fonts 目录只读/被占用——主副本已部署成功，镜像失败不致命
         pass
     if log:
         log(f"已部署 TMP 中文字体包 → {dest.name} ({dest.stat().st_size // 1024} KB)")
@@ -1044,8 +1047,9 @@ def ensure_xua_cjk_font(game_dir: Path, log: LogFn = None) -> str:
         patch_paranormasight_tmp_font(game_dir, log)
         try:
             patch_hazy_localization_glossary(game_dir, log=log)
-        except Exception:
-            pass
+        except Exception as e:
+            if log:
+                log(f"警告: Hazy 剧本词典硬化失败（词典仍可用，但 Hazy 包内文本可能不完整）: {e}")
     except Exception as e:
         if log:
             log(f"TMP MAIN 字体注入异常（已忽略）: {e}")
@@ -1077,6 +1081,7 @@ def write_autotranslator_config(
     source_lang: str = "ja",
     *,
     mode: str = "offline",
+    log: LogFn = None,
 ) -> Path:
     """Write/patch XUA config.
 
@@ -1127,9 +1132,10 @@ def write_autotranslator_config(
     }
     # IL2CPP: OS font override is broken; ensure_xua_cjk_font prefers TMP SDF bundle
     try:
-        ensure_xua_cjk_font(game_dir, log=None)
-    except Exception:
-        pass
+        ensure_xua_cjk_font(game_dir, log=log)
+    except Exception as e:
+        if log:
+            log(f"警告: 中文字体包配置失败（进游戏可能显示 □）: {e}")
     if harvest:
         updates["Url"] = proxy
         updates["EnableShortDelay"] = "True"
@@ -1257,7 +1263,7 @@ def set_xua_runtime_mode(
         n = merge_xua_dictionaries(game_dir, target_lang if target_lang.startswith("zh") else "zh-CN", log)
         if log:
             log(f"离线锁定：已合并 {n} 条，关闭 Endpoint")
-    write_autotranslator_config(game_dir, target_lang, source_lang, mode=mode)
+    write_autotranslator_config(game_dir, target_lang, source_lang, mode=mode, log=log)
     write_cn_launcher(game_dir, log, mode=mode)
     if log:
         if mode == "harvest":
@@ -1383,6 +1389,7 @@ def ensure_il2cpp_bruteforce_fix(game_dir: Path, log: LogFn = None) -> Optional[
         mirror.parent.mkdir(parents=True, exist_ok=True)
         mirror.write_bytes(dll_bytes)
     except OSError:
+        # cache 镜像写不进——补丁已注入，镜像只是离线缓存，失败不致命
         pass
     dest.write_bytes(dll_bytes)
     if log:
@@ -1459,7 +1466,7 @@ def deploy_runtime_inject(
 
     ensure_runtime_plugins(game_dir, log)
     disable_broken_bruteforce_fix(game_dir, log)
-    write_autotranslator_config(game_dir, at_lang, source_lang or "ja", mode="offline")
+    write_autotranslator_config(game_dir, at_lang, source_lang or "ja", mode="offline", log=log)
     try:
         fn = ensure_xua_cjk_font(game_dir, log)
         if log:

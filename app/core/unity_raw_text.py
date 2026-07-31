@@ -267,8 +267,9 @@ def collect_mb_units(
             keys = discover_unity_cn_keys(game_dir)
             if keys:
                 apply_unity_cn_keys(keys, log)
-        except Exception:
-            pass
+        except Exception as e:
+            if log:
+                log(f"警告: 应用 UnityCN 密钥失败（加密 bundle 可能无法解密）: {e}")
 
     for fp in asset_files:
         if log:
@@ -400,8 +401,9 @@ def collect_runtime_jp_corpus(game_dir: Path, log: LogFn = None) -> List[str]:
         keys = discover_unity_cn_keys(game_dir)
         if keys:
             apply_unity_cn_keys(keys, log)
-    except Exception:
-        pass
+    except Exception as e:
+        if log:
+            log(f"警告: 应用 UnityCN 密钥失败（加密 bundle 可能无法解密）: {e}")
     for fp in asset_files:
         if log:
             log(f"  深扫全对象字串: {fp.name}")
