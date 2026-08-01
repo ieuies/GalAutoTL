@@ -1,4 +1,8 @@
-PySide6>=6.6.0
+# GalAutoTL dependencies.
+# Lower bounds are the versions the code was verified against. Upper bounds only
+# where a major bump is known to be risky (Qt/PySide major, UnityPy internal API).
+# ensure_deps.py auto-installs the runtime subset at launch with the same pins.
+PySide6>=6.6.0,<7.0
 PyInstaller>=6.3.0
 UnityPy>=1.10.0
 TypeTreeGeneratorAPI>=0.0.10

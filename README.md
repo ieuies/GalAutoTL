@@ -200,6 +200,42 @@ build_exe.bat
 - 点 **仅译漏句**：只翻译 remain 里仍漏的句子（需先完整汉化一次）  
 - 点 **图片UI清单**：扫描 `graphic=` / `storage=` 等，写出 `GalAutoTL_image_ui.txt`（改像素字仍靠手工）
 
+## 开发指南
+
+面向想改代码 / 加引擎 / 提 PR 的开发者。
+
+### 环境
+
+- **跑测试不需要重依赖**：测试是纯逻辑层（不 import GUI / UnityPy），只需 `pytest` + `zstandard`：
+  ```bat
+  py -3 -m pip install pytest zstandard
+  py -3 -m pytest tests -q
+  ```
+  完整跑起来才需要 `pip install -r requirements.txt`（含 PySide6 / UnityPy）。
+- CI 已配好（`.github/workflows/ci.yml`）：push/PR 时在 Python 3.10–3.13 上跑全量测试。
+
+### 代码结构
+
+| 目录 | 职责 |
+|------|------|
+| `app/pipelines/` | 每条引擎一条管线，统一入口 `run_<engine>(cfg, log, progress, cancel)` |
+| `app/core/` | 解包 / 编码 / 翻译 / 润色 / 术语 / 漏句闭环等底层能力 |
+| `app/ui/` | PySide6 界面（`main_window.py` 布局、`styles.py` 主题 QSS） |
+| `tests/` | pytest 回归 + 假 AI 质量门禁 + 迷你 e2e |
+
+### 加一条引擎管线的步骤
+
+1. `app/core/detect.py` 加引擎检测分支（返回 `pipeline` 名）
+2. `app/pipelines/` 新建 `<engine>.py`，实现 `run_<engine>`
+3. `app/ui/main_window.py` 的 `ENGINE_PIPES` / 下拉框 / `Worker.run` 注册该管线
+4. 加测试：工具函数回归 +（尽量）一个迷你 e2e（参考 `tests/test_pipeline_e2e.py`，用假 AI 驱动完整 `run_*`）
+5. 跑 `py -3 -m pytest tests -q` 确认全绿
+
+### 版本管理约定（重要）
+
+- **运行时下载的包（BepInEx / XUA / 字体等）已固定版本**：改 `unity_runtime_inject.py` 的 URL 常量时，**必须同步更新 `PACKAGE_SHA256` 里对应包的哈希**（`_download` 会校验，哈希不符直接拒绝）。
+- **pip 依赖**：`requirements.txt` 与 `ensure_deps.py` 的自动安装都锁了下限；升级大版本前先确认代码用到的内部 API 仍存在（如 `UnityPy.helpers.TypeTreeGenerator`）。
+
 ## 组合使用的外部项目
 
 本工具是编排/写回层，运行时会调用或下载下列上游（链接便于自行核对许可与版本）。**不是**它们的官方发行版。

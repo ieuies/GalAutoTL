@@ -10,10 +10,12 @@ from typing import Callable, List, Optional, Sequence, Tuple
 LogFn = Optional[Callable[[str], None]]
 
 # (import_name, pip_name)
+# Pinned ranges: verified against these majors; a big upstream bump could break
+# internal API paths (UnityPy.helpers.TypeTreeGenerator etc.). Adjust on purpose.
 _REQUIRED: Sequence[Tuple[str, str]] = (
-    ("UnityPy", "UnityPy"),
-    ("TypeTreeGeneratorAPI", "TypeTreeGeneratorAPI"),
-    ("zstandard", "zstandard"),
+    ("UnityPy", "UnityPy>=1.10.0"),
+    ("TypeTreeGeneratorAPI", "TypeTreeGeneratorAPI>=0.0.10"),
+    ("zstandard", "zstandard>=0.22.0"),
 )
 
 
