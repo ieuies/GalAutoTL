@@ -111,3 +111,56 @@ def test_softpal_pipeline_rejects_empty_text(tmp_path: Path, monkeypatch):
 
     with pytest.raises(RuntimeError):
         sp.run_softpal(cfg, log=lambda m: None)
+
+
+def test_generic_text_pipeline_end_to_end(tmp_path: Path, monkeypatch):
+    """run_generic on a plain .txt dir: collect → translate (fake AI) → writeback."""
+    import app.pipelines.generic_text as gt
+
+    game = tmp_path / "game"
+    (game / "script").mkdir(parents=True)
+    script = game / "script" / "story.txt"
+    script.write_text("こんにちは、世界。\nまた明日。\n", encoding="utf-8")
+
+    # Avoid detect_engine routing this dir to an engine pipeline: a bare txt
+    # folder with no .xp3/.ks/.pac etc. should classify as generic text.
+    monkeypatch.setattr(gt, "OpenAICompatClient", FakeAI)
+
+    cfg = AppConfig(game_dir=str(game), text_dir=str(game), api_key="x", api_model="fake")
+    cfg.do_backup = False
+    cfg.mt_polish = False
+    cfg.source_lang = "ja"
+    cfg.lang = "zh_cn"
+
+    logs: list[str] = []
+    gt.run_generic(cfg, log=logs.append)
+
+    out = script.read_text(encoding="utf-8")
+    assert "你好" in out, "txt 行应写回中文"
+    assert "こんにちは" not in out, "日文原文应被替换"
+
+
+def test_generic_text_pipeline_detects_engine_and_routes(tmp_path: Path, monkeypatch):
+    """A .xp3 file must route generic → kirikiri instead of mis-translating a pack."""
+    import app.pipelines.generic_text as gt
+    import app.pipelines.kirikiri as kr
+
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "data.xp3").write_bytes(b"XP3\x00")
+    called = {"n": 0}
+
+    def _fake_kirikiri(cfg, log=None, progress=None, cancel=None):
+        called["n"] += 1
+
+    # run_generic does `from app.pipelines.kirikiri import run_kirikiri` inside the
+    # function — patch the real function in its defining module.
+    monkeypatch.setattr(kr, "run_kirikiri", _fake_kirikiri)
+    monkeypatch.setattr(gt, "OpenAICompatClient", FakeAI)
+
+    cfg = AppConfig(game_dir=str(game), text_dir=str(game), api_key="x", api_model="fake")
+    cfg.do_backup = False
+    cfg.mt_polish = False
+
+    gt.run_generic(cfg, log=lambda m: None)
+    assert called["n"] == 1, "带 .xp3 的目录应路由到 kirikiri 管线"
