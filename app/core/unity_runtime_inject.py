@@ -6,6 +6,7 @@ Supports Mono (BepInEx 5) and IL2CPP (BepInEx 6 pre + XUA-IL2CPP).
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import zipfile
@@ -71,6 +72,22 @@ TMP_FONT_BUNDLE_PREFER = (
     "arialuni_sdf_u2018",
     "arialuni_sdf",
 )
+
+# SHA-256 of the exact upstream packages this repo was verified against
+# (computed from GitHub/unity.bepinex.dev official downloads — see commit msg).
+# _download verifies these; a mismatch = tampered/mirror-corrupt/upstream-rebuilt.
+# Version bumps must update both the URL constant AND this hash.
+PACKAGE_SHA256: Dict[str, str] = {
+    BEPINEX_IL2CPP_ASSET: "616ec7eb06cf11b2a0000e8fcef04d1b12bb58e84a2e0bdac9523234fc193ceb",
+    BEPINEX_MONO_ASSET: "82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4",
+    XUA_MONO_ASSET: "fbb7d1bbe2c7cc168da6dccbc500fb74786a85a548f52495c8a1592ac46407f5",
+    XUA_IL2CPP_ASSET: "9d6b26e9d4957459bdb64b6d4852edb39cd5e8d31c28e0a157cefd6510ada811",
+    BRUTEFORCE_FIX_ASSET: "5366c8b8243f5e0a80190b108aec0aa0c9df0c7a5bc52083a3cad05f3a8d0b37",
+    TMP_FONT_ZIP_ASSET: "cd18628ea3bd1128fa172b910ae15685f89ff689b20c4836d42d42491c26dd39",
+    TMP_FONT_7Z_ASSET: "889e963fb9dbd4b64927e0adf5d9060e1d0fb9d6bceb0c407d0597643e2b54ec",
+    "2021.3.8.zip": "e939de3a4961a0f0c13a13b5da01b72536ee99cabb18943d513f39c5f9c03ee6",
+    "2023.1.15.zip": "5fe995ffe1d7cfe86c3aa718bb1a6965cb8dcda6347708f105ff62310389c048",
+}
 
 
 TMP_FONT_BUNDLE_GAME = "arialuni_sdf_game"
@@ -402,6 +419,18 @@ def _local_package_candidates(dest_name: str) -> List[Path]:
     ]
 
 
+def _sha256_of(path: Path) -> str:
+    """Streaming SHA-256 of a file (avoids loading big zips fully into memory)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _download(url: str, dest: Path, log: LogFn = None, *, min_size: int = 100_000) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     # Local drop-in (user can place zip under tools/unity_runtime)
@@ -434,8 +463,19 @@ def _download(url: str, dest: Path, log: LogFn = None, *, min_size: int = 100_00
                     f.write(chunk)
             if dest.stat().st_size < min_size:
                 raise RuntimeError(f"下载文件过小: {dest.stat().st_size}")
+            expected = PACKAGE_SHA256.get(dest.name)
+            if expected:
+                actual = _sha256_of(dest)
+                if actual != expected:
+                    dest.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"SHA256 不匹配: {dest.name}\n"
+                        f"  期望 {expected}\n"
+                        f"  实际 {actual}\n"
+                        "可能是镜像被篡改或上游重打包。请手动从官方 Release 下载核对。"
+                    )
             if log:
-                log(f"已保存 {dest.name} ({dest.stat().st_size // 1024} KB)")
+                log(f"已保存 {dest.name} ({dest.stat().st_size // 1024} KB)" + ("，SHA256 ✓" if expected else ""))
             # keep a tools/ mirror for offline reinstalls
             tools_copy = tools_runtime_dir() / dest.name
             if "unity-libs" in str(dest).replace("\\", "/"):
