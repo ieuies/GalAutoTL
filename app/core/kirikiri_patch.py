@@ -254,6 +254,28 @@ def count_plain_ks(root: Path) -> Tuple[int, int]:
     return plain, total
 
 
+def count_deployable_ks(root: Path) -> Tuple[int, int]:
+    """Return (deployable_count, total_ks) using the STRICT gate.
+
+    is_deployable_scenario_bytes rejects cxdec ciphertext that happens to
+    decode to something kana-ish (looks_like_ks_script is too lenient there),
+    so this is the right signal for "content layer still encrypted → needs
+    GARbro".
+    """
+    total = 0
+    good = 0
+    for p in root.rglob("*.ks"):
+        if not p.is_file():
+            continue
+        total += 1
+        try:
+            if is_deployable_scenario_bytes(p.read_bytes()):
+                good += 1
+        except OSError:
+            pass
+    return good, total
+
+
 def ks_tree_looks_already_chinese(root: Path, *, sample_files: int = 24) -> bool:
     """True if sampled plaintext .ks dialogue looks mostly already Chinese.
 
@@ -303,20 +325,74 @@ def ks_tree_looks_already_chinese(root: Path, *, sample_files: int = 24) -> bool
     return cn >= max(jp * 2, 1) and cn >= 5
 
 
+def _scenario_ks_count_in_archives(game_dir: Path) -> int:
+    """Total scenario/*.ks across original .xp3 archives (best-effort).
+
+    Excludes GalAutoTL-generated packs (unencrypted.xp3, patch*.xp3) so the
+    comparison against unencrypted/ reflects the true JP source size.
+    """
+    from app.core.xp3_io import find_xp3_archives, list_xp3
+    try:
+        archives = find_xp3_archives(game_dir)
+    except Exception:
+        return 0
+    total = 0
+    for arc in archives:
+        name = arc.name.lower()
+        if "unencrypted" in name or name.startswith("patch"):
+            continue
+        try:
+            for e in list_xp3(arc):
+                p = e.path.lower()
+                if p.startswith("scenario/") and p.endswith(".ks"):
+                    total += 1
+        except Exception:
+            continue
+    return total
+
+
+def _unencrypted_incomplete(game_dir: Path) -> bool:
+    """True if unencrypted/ has far fewer scenario scripts than the archives.
+
+    version.dll only exports scripts the game actually loaded; on a fresh run
+    the later scenario files are missing, so translating from unencrypted/
+    yields Chinese only for the first chapters. In that case prefer the full
+    extract from the .xp3 archives instead.
+    """
+    unenc = game_dir / "unencrypted" / "scenario"
+    if not unenc.is_dir():
+        return False
+    try:
+        n_unenc = len(list(unenc.glob("*.ks")))
+    except OSError:
+        return False
+    n_arch = _scenario_ks_count_in_archives(game_dir)
+    # Archives empty / can't list → trust unencrypted as-is.
+    if n_arch <= 0:
+        return False
+    # unencrypted/ is a partial export when it has fewer scenario scripts
+    # than the archives (version.dll only exports what was loaded so far).
+    return n_unenc < n_arch
+
+
 def find_plaintext_source(game_dir: Path, text_dir: Optional[Path]) -> Optional[Path]:
     """Pick best folder of plaintext .ks: explicit text_dir, then unencrypted/.
 
     Skip trees that already look Chinese when a JP archive / unencrypted JP
     source is still available — otherwise a second full run re-translates CN.
+    If unencrypted/ is a partial export (fewer scenario scripts than the .xp3
+    archives), prefer the full archive extract instead.
     """
     from app.core.xp3_io import find_xp3_archives
 
+    unenc = game_dir / "unencrypted"
     candidates: List[Path] = []
     if text_dir and text_dir.is_dir():
         candidates.append(text_dir)
-    unenc = game_dir / "unencrypted"
-    if unenc.is_dir() and unenc not in candidates:
-        candidates.append(unenc)
+    # unencrypted 明显不完整时，不直接用它（改为从 XP3 完整解包）
+    if unenc.is_dir() and not _unencrypted_incomplete(game_dir):
+        if unenc not in candidates:
+            candidates.append(unenc)
 
     has_archive = bool(find_xp3_archives(game_dir))
     for cand in candidates:
@@ -334,8 +410,9 @@ def find_plaintext_source(game_dir: Path, text_dir: Optional[Path]) -> Optional[
         return cand
     # Only fall back to unencrypted when it is still JP (or no XP3 to extract).
     # If unencrypted is already CN and XP3 exists, return None → force extract.
+    # If unencrypted is a partial export, return None → prefer full archive extract.
     if unenc.is_dir() and count_plain_ks(unenc)[0] >= 3:
-        if has_archive and ks_tree_looks_already_chinese(unenc):
+        if has_archive and (ks_tree_looks_already_chinese(unenc) or _unencrypted_incomplete(game_dir)):
             return None
         return unenc
     return None

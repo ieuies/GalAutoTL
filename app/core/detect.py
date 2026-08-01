@@ -66,7 +66,36 @@ def _has_lcse(root: Path) -> bool:
     return False
 
 
-def detect_engine(game_dir: str | Path) -> DetectResult:
+def _drill_into_subdirs(root: Path, depth: int = 0) -> Optional[DetectResult]:
+    """If the game lives one folder deep (root/game/data.xp3), drill into each
+    direct subdirectory and run the engine checks there.
+
+    Deliberately shallow (direct children only, depth-capped to avoid runaway
+    recursion) and only for *clear* engine markers — a folder of plain text
+    must still classify as generic, not accidentally match.
+    """
+    if depth >= 2 or not root.is_dir():
+        return None
+    try:
+        subdirs = sorted(
+            p for p in root.iterdir()
+            if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
+        )
+    except OSError:
+        return None
+    # 每个子目录跑一遍标准探测；只接受高置信度命中，避免误判
+    for sub in subdirs:
+        det = detect_engine(sub, _depth=depth + 1)
+        if det.pipeline != "generic" and det.confidence == "high":
+            det.hints.insert(
+                0,
+                f"检测到游戏在子文件夹 {sub.name}/ 内（已自动识别）",
+            )
+            return det
+    return None
+
+
+def detect_engine(game_dir: str | Path, _depth: int = 0) -> DetectResult:
     root = Path(game_dir)
     if not root.is_dir():
         return DetectResult(notes=["目录无效"], hints=["请选择游戏根目录"])
@@ -402,6 +431,14 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
         )
 
     # Generic text-heavy folder（忽略本工具自己写的对照表/术语表，避免误判）
+    # ————————————————————————————————————————————————————————
+    # 下钻检测：第一层没发现引擎时，游戏可能被包在一层子文件夹里
+    # （如 <根目录>/<游戏名>/data.xp3）。只浅扫直接子目录，避免误判
+    # 普通文本目录或扫进游戏资源内部。
+    drilled = _drill_into_subdirs(root, depth=_depth)
+    if drilled is not None:
+        return drilled
+
     exts = (".txt", ".json", ".csv", ".ks", ".po", ".yml", ".yaml", ".tsv", ".utf", ".rpy")
     skip_names = {
         "galautotl_review.txt",

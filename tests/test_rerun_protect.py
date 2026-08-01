@@ -156,3 +156,35 @@ def test_find_plaintext_allows_cn_unencrypted_without_archive(tmp_path: Path, mo
     src = kp.find_plaintext_source(game, None)
     assert src == game / "unencrypted"
 
+
+def test_find_plaintext_prefers_full_archive_when_unencrypted_partial(tmp_path: Path, monkeypatch):
+    """Partial unencrypted/ (fewer scenario scripts than archives) → force full XP3 extract."""
+    from app.core import kirikiri_patch as kp
+    from app.core.ks_script import write_ks
+
+    game = tmp_path / "game"
+    unenc = game / "unencrypted" / "scenario"
+    unenc.mkdir(parents=True)
+    write_ks(unenc / "00_000.ks", "[iscript]\n[endscript]\nこんにちは\n", "utf-16-le")
+    # 只有 1 个 scenario 剧本
+    monkeypatch.setattr(kp, "_scenario_ks_count_in_archives", lambda _g: 25)  # 封包有 25 个
+    assert kp._unencrypted_incomplete(game) is True
+    # 应返回 None → 强制从 XP3 完整解包
+    assert kp.find_plaintext_source(game, None) is None
+
+
+def test_find_plaintext_keeps_unencrypted_when_complete(tmp_path: Path, monkeypatch):
+    """Complete unencrypted/ (same count as archives) → keep using it (no regression)."""
+    from app.core import kirikiri_patch as kp
+    from app.core.ks_script import write_ks
+
+    game = tmp_path / "game"
+    unenc = game / "unencrypted" / "scenario"
+    unenc.mkdir(parents=True)
+    for i in range(5):
+        write_ks(unenc / f"{i:02d}_000.ks", "[iscript]\n[endscript]\nこんにちは\n", "utf-16-le")
+    monkeypatch.setattr(kp, "_scenario_ks_count_in_archives", lambda _g: 5)  # 封包也是 5 个
+    assert kp._unencrypted_incomplete(game) is False
+    src = kp.find_plaintext_source(game, None)
+    assert src == game / "unencrypted"
+

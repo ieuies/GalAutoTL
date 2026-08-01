@@ -164,3 +164,41 @@ def test_generic_text_pipeline_detects_engine_and_routes(tmp_path: Path, monkeyp
 
     gt.run_generic(cfg, log=lambda m: None)
     assert called["n"] == 1, "带 .xp3 的目录应路由到 kirikiri 管线"
+
+
+def test_detect_drills_into_nested_game_folder(tmp_path: Path):
+    """Game one folder deep (root/GameName/data.xp3) must still detect engine."""
+    from app.core.detect import detect_engine
+
+    root = tmp_path / "SteamLibrary"
+    game = root / "MyGame"
+    game.mkdir(parents=True)
+    (game / "data.xp3").write_bytes(b"XP3\x00")
+
+    det = detect_engine(root)
+    assert det.pipeline == "kirikiri", f"嵌套游戏应识别为 kirikiri，实际 {det.pipeline}"
+    assert det.hints and "子文件夹" in det.hints[0], "应提示检测到子文件夹"
+
+
+def test_detect_nested_does_not_misjudge_plain_text(tmp_path: Path):
+    """A folder of plain text must stay generic even with subfolders present."""
+    from app.core.detect import detect_engine
+
+    root = tmp_path / "texts"
+    root.mkdir()
+    (root / "readme.txt").write_text("plain text\n", encoding="utf-8")
+
+    det = detect_engine(root)
+    assert det.pipeline == "generic", f"纯文本目录不应误判，实际 {det.pipeline}"
+
+
+def test_detect_nested_depth_capped(tmp_path: Path):
+    """Deep nesting must not trigger runaway recursion."""
+    from app.core.detect import detect_engine
+
+    deep = tmp_path / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "x.txt").write_text("text\n", encoding="utf-8")
+
+    det = detect_engine(tmp_path / "a")  # should terminate quickly
+    assert det.pipeline in ("generic", "packed")

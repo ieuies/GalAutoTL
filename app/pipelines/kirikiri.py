@@ -180,9 +180,15 @@ def _extract_scripts(
     garbro = find_garbro(extra)
     if garbro and log:
         log(f"检测到外部解包器: {garbro}")
+    else:
+        # 内置解不开的封包才需要 GARbro；先标记，遇到失败再自动下载
+        garbro = None
 
     for arc in targets:
-        if "patch" in arc.name.lower():
+        name_l = arc.name.lower()
+        # 跳过汉化产物封包：patch*.xp3 与 unencrypted.xp3（后者是 version.dll
+        # 导出的部分明文，非完整源；解它会把完整解包结果污染成残缺）
+        if "patch" in name_l or "unencrypted" in name_l:
             continue
         if log:
             log(f"尝试解包: {arc.name}")
@@ -199,6 +205,14 @@ def _extract_scripts(
         except XP3Error as e:
             if log:
                 log(f"  内置解包失败: {e}")
+
+        # 内置解不开且尚无 GARbro → 自动下载官方版（MIT 许可，可自动分发）
+        if not garbro:
+            from app.core.garbro_cli import ensure_garbro
+
+            garbro = ensure_garbro(log)
+            if garbro and log:
+                log(f"已自动获取 GARbro: {garbro}")
 
         if garbro:
             sub = work / "_garbro" / arc.stem
@@ -232,6 +246,44 @@ def _extract_scripts(
         if enc_fail:
             tip += "涉及: " + ", ".join(enc_fail)
         raise RuntimeError(tip)
+
+    from app.core.kirikiri_patch import count_deployable_ks
+
+    n_plain, n_total = count_deployable_ks(scripts)
+    # 部分明文（如 cxdec 内容层只解出一部分）：解出文件但内容是乱码
+    # → 需要 GARbro 解内容层。若本机没有 GARbro，自动下载官方版重解。
+    if n_plain > 0 and n_plain < n_total and n_total >= 3:
+        if log:
+            log(
+                f"剧本内容层仅明文 {n_plain}/{n_total}（其余为 cxdec 密文乱码），"
+                "需要 GARbro 解内容层…"
+            )
+        from app.core.garbro_cli import ensure_garbro
+
+        garbro = ensure_garbro(log)
+        if garbro:
+            if log:
+                log(f"用 GARbro 重解 data.xp3 内容层: {garbro}")
+            # 用 GARbro 解所有封包，覆盖明文剧本
+            for arc in find_xp3_archives(game_dir):
+                name_l = arc.name.lower()
+                if "patch" in name_l or "unencrypted" in name_l:
+                    continue
+                sub = work / "_garbro_full" / arc.stem
+                if sub.exists():
+                    shutil.rmtree(sub)
+                ok = extract_with_garbro(arc, sub, garbro, log)
+                if ok:
+                    for p in sub.rglob("*.ks"):
+                        if not p.is_file():
+                            continue
+                        rel = normalize_kag_relpath(p.relative_to(sub))
+                        dest = scripts / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(p, dest)
+            n_plain2, n_total2 = count_plain_ks(scripts)
+            if log:
+                log(f"GARbro 重解后明文: {n_plain2}/{n_total2}")
 
     n_plain, n_total = count_plain_ks(scripts)
     if n_plain == 0:

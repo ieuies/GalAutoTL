@@ -310,47 +310,102 @@ class MainWindow(QMainWindow):
         shell.setContentsMargins(14, 14, 14, 14)
         shell.setSpacing(12)
 
-        # —— Sidebar nav ——
+        # —— Sidebar: 三步引导 ——
         side = QFrame()
-        side.setObjectName("navSide")
-        side.setFixedWidth(148)
+        side.setObjectName("guideSide")
+        side.setFixedWidth(300)
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(10, 14, 10, 12)
-        sl.setSpacing(6)
-        mark = QLabel("GALAUTOTL")
-        mark.setObjectName("navMark")
-        sl.addWidget(mark)
-        brand = QLabel("工作台")
-        brand.setObjectName("navBrand")
-        sl.addWidget(brand)
+        sl.setContentsMargins(10, 6, 10, 12)
+        sl.setSpacing(8)
+
+        # 顶部品牌区
+        brand_row = QHBoxLayout()
+        brand_l = QVBoxLayout()
+        brand_l.setSpacing(0)
+        title = QLabel("GalAutoTL")
+        title.setObjectName("brandTitle")
+        brand_l.addWidget(title)
+        sub = QLabel("Galgame 一键汉化工作台")
+        sub.setObjectName("brandSub")
+        brand_l.addWidget(sub)
+        brand_row.addLayout(brand_l)
+        brand_row.addStretch(1)
+        ver = QLabel("v1.0")
+        ver.setObjectName("versionChip")
+        brand_row.addWidget(ver, 0, Qt.AlignmentFlag.AlignTop)
+        sl.addLayout(brand_row)
         sl.addSpacing(10)
 
+        # 三步引导卡片
+        # 步骤1→汉化页(0)，步骤2→API页(1)，步骤3→直接触发开始汉化(不切页)
         self._nav_btns: list[QPushButton] = []
-        nav_specs = (
-            ("汉化", "选目录、选项、开始汉化"),
-            ("接口", "云端 API 设置"),
-            ("译质", "对照表、术语、人设"),
-            ("工具", "润色、漏句、字体等"),
-            ("高级", "管线、源语言、编码"),
-        )
         nav_group = QButtonGroup(self)
         nav_group.setExclusive(True)
-        for i, (name, tip) in enumerate(nav_specs):
-            b = QPushButton(name)
-            b.setObjectName("navBtn")
-            b.setCheckable(True)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda checked=False, idx=i: self._switch_page(idx))
-            nav_group.addButton(b, i)
-            self._nav_btns.append(b)
-            sl.addWidget(b)
+
+        def _make_step(num, name, desc, page=None, action=None):
+            card = QPushButton()
+            card.setObjectName("navStepBtn")
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setCheckable(True)
+            card.setFixedHeight(58)
+            card._step_page = page
+            inner = QHBoxLayout(card)
+            inner.setContentsMargins(12, 6, 12, 6)
+            inner.setSpacing(10)
+            num_l = QLabel(num)
+            num_l.setObjectName("stepNum")
+            num_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            inner.addWidget(num_l)
+            text_l = QVBoxLayout()
+            text_l.setSpacing(1)
+            t = QLabel(name)
+            t.setObjectName("stepTitle")
+            text_l.addWidget(t)
+            dd = QLabel(desc)
+            dd.setObjectName("stepDesc")
+            text_l.addWidget(dd)
+            inner.addLayout(text_l)
+            inner.addStretch(1)
+            if action is not None:
+                card.clicked.connect(lambda checked=False: action())
+            else:
+                card.clicked.connect(lambda checked=False, idx=page: self._switch_page(idx))
+            nav_group.addButton(card)
+            self._nav_btns.append(card)
+            sl.addWidget(card)
+            return card
+
+        _make_step("1", "选择游戏", "选择游戏根目录或文本目录", page=0)
+        sl.addWidget(self._mk_connector())
+        _make_step("2", "填写 API", "DeepSeek / OpenAI 兼容 Key", page=1)
+        sl.addWidget(self._mk_connector())
+        _make_step("3", "开始汉化", "一键执行 · 自动探测引擎", page=None, action=self._on_step3)
         self._nav_btns[0].setChecked(True)
+
+        sl.addSpacing(8)
         sl.addStretch(1)
-        side_hint = QLabel("日志在右侧")
-        side_hint.setObjectName("navHint")
-        side_hint.setWordWrap(True)
-        sl.addWidget(side_hint)
+
+        # 更多入口：译质 / 工具 / 高级
+        more = QPushButton("▸ 更多工具（对照表 · 术语 · 润色）")
+        more.setObjectName("foldBtn")
+        more.setCursor(Qt.CursorShape.PointingHandCursor)
+        more.setCheckable(True)
+        more.clicked.connect(lambda: self._switch_page(2))
+        sl.addWidget(more)
+        self._more_btns = [more]
+        # 折叠的次级工具按钮（译质/工具/高级）
+        for name, page, tip in (
+            ("译质 · 对照表 · 术语", 2, "对照表、术语表、人设规则"),
+            ("工具 · 润色 · 漏句", 3, "仅润色、仅译漏句、图片UI、字体"),
+            ("高级 · 管线 · 编码", 4, "源语言、编码、强制管线"),
+        ):
+            b = QPushButton(name)
+            b.setObjectName("toolBtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda checked=False, idx=page: self._switch_page(idx))
+            b.setToolTip(tip)
+            sl.addWidget(b)
+        sl.addSpacing(2)
         shell.addWidget(side, 0)
 
         # —— Center pages ——
@@ -694,6 +749,18 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.log_view, 1)
         shell.addWidget(right, 1)
 
+    def _mk_connector(self) -> QFrame:
+        conn = QFrame()
+        conn.setObjectName("stepConnector")
+        conn.setFixedHeight(14)
+        return conn
+
+    def _on_step3(self) -> None:
+        """步骤3：直接触发开始汉化；若已在运行则切到汉化页。"""
+        self._switch_page(0)
+        self._nav_btns[0].setChecked(True)
+        self.on_start()
+
     def _wrap_scroll(self, inner: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setObjectName("leftScroll")
@@ -707,8 +774,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_stack"):
             return
         self._stack.setCurrentIndex(idx)
-        for i, b in enumerate(getattr(self, "_nav_btns", [])):
-            b.setChecked(i == idx)
+        # 步骤按钮高亮：仅高亮映射到当前页的步骤（步骤3无固定页面→不高亮）
+        for b in getattr(self, "_nav_btns", []):
+            b.setChecked(getattr(b, "_step_page", None) is not None and b._step_page == idx)
+        for more in getattr(self, "_more_btns", []):
+            more.setChecked(idx >= 2)
 
     def _section(self, text: str) -> QLabel:
         lab = QLabel(text)
@@ -743,8 +813,6 @@ class MainWindow(QMainWindow):
         simple = self.simple_mode.isChecked()
         self.adv_box.setVisible(not simple)
         self._api_adv.setVisible(not simple)
-        if len(getattr(self, "_nav_btns", [])) > 4:
-            self._nav_btns[4].setEnabled(True)
         if simple:
             self.pipeline.setCurrentIndex(self.pipeline.findData("auto"))
             self.cp932.setChecked(False)
