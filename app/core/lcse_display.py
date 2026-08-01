@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """LCSE / Liquid Chinese display patches (GBK CharSet + DBCS + GetACP).
 
-Lessons from《大催眠乱交学院》localization:
+Lessons from LCSE localization:
 - Text is GetGlyphOutlineA; lfCharSet must be GB2312 (0x86), not Shift-JIS (0x80).
 - Hook CreateFontIndirectA so every font create forces CharSet.
 - Expand SJIS lead/trail checks to GBK.

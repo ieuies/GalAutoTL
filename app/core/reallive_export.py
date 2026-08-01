@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Auto-provision RLDev (kprl) and export RealLive SEEN.TXT → export_utf8.
 
-Coming×Humming lesson: GalAutoTL used to require a pre-made `_tools/export_utf8`.
+RealLive lesson: GalAutoTL used to require a pre-made `_tools/export_utf8`.
 That step is now part of the RealLive pipeline (download kprl → disassemble slots).
 """
 from __future__ import annotations

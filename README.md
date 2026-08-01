@@ -76,7 +76,7 @@ build_exe.bat
 4. **源语言**选日文 / 英文 / 韩文 / 俄文 / 自动 / 其它
 5. 填 API Key → **开始汉化**
 
-### Liquid / LCSE（`lcsebody1`，如《大催眠乱交学院》）— 一键可用
+### Liquid / LCSE（`lcsebody1`）— 一键可用
 
 实测流程已固化进工具：
 
@@ -166,15 +166,15 @@ build_exe.bat
 
 ### SakanaGL（`.sx` / `.sxstorage`）— 一键
 
-如 `IsekaiHaremSaver`：解 `SSXXDEFL` 索引 → 解密/解压条目 → AI 译文本 → **槽位夹紧**写回 `.sxstorage`。  
+解 `SSXXDEFL` 索引 → 解密/解压条目 → AI 译文本 → **槽位夹紧**写回 `.sxstorage`。  
 依赖 `zstandard`。过长译文可能无法塞回原槽（保留日文）。工作目录：`_galautotl_sakana\`
 
 ### 古早 RealLive — 一键
 
-选含 `SEEN.TXT` 的游戏根目录即可。无 `_tools/export_utf8` 时会**自动下载 RLDev/kprl** 解包再翻译（Coming×Humming 经验已并入）。  
+选含 `SEEN.TXT` 的游戏根目录即可。无 `_tools/export_utf8` 时会**自动下载 RLDev/kprl** 解包再翻译（实战经验已并入）。  
 译文写到 `_tools/patch_work/cn_utf8`；若 `_tools` 里有 `full_patch.py` 可尝试自动写回。
 
-**译文质量（多引擎通用，Coming×Humming 实战固化）：**
+**译文质量（多引擎通用，实战固化）：**
 
 | 阶段 | RealLive | Kirikiri | Unity | Artemis | LCSE / BGI / YU-RIS / Sakana | 通用文本 |
 |------|----------|----------|-------|---------|------------------------------|----------|

@@ -74,7 +74,7 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
     notes: list[str] = []
     hints: list[str] = []
 
-    # SakanaGL — .sx / .sxstorage + sakanagl.dll (e.g. IsekaiHaremSaver)
+    # SakanaGL — .sx / .sxstorage + sakanagl.dll
     sx = list(root.glob("*.sx")) + list((root / "pkg").glob("*.sx")) if (root / "pkg").is_dir() else list(root.glob("*.sx"))
     sxstorage = list(root.glob("*.sxstorage")) + (
         list((root / "pkg").glob("*.sxstorage")) if (root / "pkg").is_dir() else []
@@ -104,7 +104,7 @@ def detect_engine(game_dir: str | Path) -> DetectResult:
             ),
         )
 
-    # LC-ScriptEngine (Liquid / NEXTON) — e.g. 大催眠乱交学園
+    # LC-ScriptEngine (Liquid / NEXTON)
     if _has_lcse(root):
         bodies = [p.name for p in root.glob("lcsebody*") if p.is_file() and not p.name.endswith(".lst")]
         notes.append("lcsebody: " + (", ".join(bodies[:4]) or "有"))

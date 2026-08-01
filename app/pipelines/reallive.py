@@ -262,7 +262,7 @@ def translate_utf_tree(
 
 
 def _ensure_reallive_display(game_dir: Path, log: LogFn = None) -> None:
-    """Coming×Humming display: prefer ONE VNTextProxy + sjis_ext + CJK font.
+    """RealLive display: prefer ONE VNTextProxy + sjis_ext + CJK font.
 
     RealLive stores text as Shift-JIS; a Chinese font alone cannot show 你/啊 etc.
     Full Simplified Chinese needs sjis_ext.bin tunneling + a single proxy DLL
@@ -279,7 +279,7 @@ def _ensure_reallive_display(game_dir: Path, log: LogFn = None) -> None:
         "xinput1_3.dll",
     )
     present = [n for n in proxies if (game_dir / n).is_file()]
-    # Coming×Humming / RealLive imports winmm.dll only — dinput8 never loads.
+    # RealLive imports winmm.dll only — dinput8 never loads.
     prefer = "winmm.dll" if "winmm.dll" in present else (
         "dinput8.dll" if "dinput8.dll" in present else (present[0] if present else "")
     )
@@ -584,7 +584,7 @@ def run_reallive(cfg: AppConfig, log: LogFn = None, progress: ProgressFn = None,
         if cn_dir is None:
             cn_dir = game_dir / "_tools" / "patch_work" / "cn_utf8"
 
-    # Coming×Humming lesson: one-click must auto-export SEEN.TXT via kprl
+    # One-click must auto-export SEEN.TXT via kprl
     if jp_dir is None or not _dir_has_utf(jp_dir):
         from app.core.reallive_export import ensure_reallive_utf_dirs, find_seen_txt
 
@@ -661,7 +661,7 @@ def run_reallive(cfg: AppConfig, log: LogFn = None, progress: ProgressFn = None,
         if log:
             log(f"漏句报告跳过: {e}")
 
-    # Coming×Humming lessons: strip JP scraps / 达 / 此何 / digit idioms / bad SFX
+    # RealLive lessons: strip JP scraps / 达 / 此何 / digit idioms / bad SFX
     if getattr(cfg, "mt_polish", True):
         polished = apply_mt_polish_tree(cn_dir, getattr(cfg, "lang", "zh_cn") or "zh_cn", log)
         if log and polished:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """LC-ScriptEngine one-click localize.
 
-Proven flow (大催眠乱交学院):
+Proven flow:
   backup → unpack SNX → AI translate → fixed-slot harden (orig size) →
   patch onto ORIGINAL package → GBK display patch on exe → CN launcher.
 
