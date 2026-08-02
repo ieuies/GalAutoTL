@@ -974,6 +974,8 @@ def ensure_tmp_cjk_font_bundle(game_dir: Path, log: LogFn = None) -> Optional[st
                 ["7z", "x", str(archive), f"-o{extract_dir}", "-y"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if r.returncode != 0:
                 raise RuntimeError(r.stderr[-300:] or r.stdout[-300:] or "7z failed")

@@ -102,6 +102,8 @@ def extract_with_garbro(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
                 cwd=str(garbro.parent),
                 stdin=subprocess.DEVNULL,  # console never prompts for a crypt scheme interactively
@@ -180,6 +182,8 @@ def _extract_archive(archive: Path, dest: Path, log: LogFn = None) -> bool:
             ["7z", "x", str(archive), f"-o{dest}", "-y"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
         )
         return r.returncode == 0
@@ -535,7 +539,15 @@ def _build_garbro_console(cache: Path, log: LogFn = None) -> Optional[Path]:
     if log:
         log(f"从官方源码编译 GARbro.Console（{src.name}）… 约 10-60 秒")
     try:
-        r = sp.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(src))
+        r = sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            cwd=str(src),
+        )
     except Exception as e:
         if log:
             log(f"GARbro.Console 编译异常: {e}")

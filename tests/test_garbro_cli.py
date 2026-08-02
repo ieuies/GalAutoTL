@@ -54,3 +54,16 @@ def test_patch_net20_csproj_idempotent(tmp_path: Path):
     # idempotent: second call must not corrupt / duplicate
     assert _patch_net20_csproj(tmp_path) is True
     assert p.read_text(encoding="utf-8").count("ReferenceAssemblies.net20") == 1
+
+
+def test_subprocess_capture_never_strict_decode():
+    """Chinese-Windows subprocess output (UTF-8 GARbro / GBK 7z/MSBuild) must be
+    decoded with errors="replace". The strict default ('gbk') crashed with
+    UnicodeDecodeError in the reader thread when GARbro.Console printed a
+    Japanese archive path."""
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("app/core/garbro_cli.py", "app/core/unity_runtime_inject.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        n_text = text.count("text=True")
+        n_replace = text.count('errors="replace"')
+        assert n_replace >= n_text, f"{rel}: text=True without errors=replace"
