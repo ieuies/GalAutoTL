@@ -102,3 +102,46 @@ class TestApplyAdlerFilter:
         fixed = _apply_xp3dec_adler_filter(out, entries)
         assert fixed == 0
         assert (out / "scenario" / "10_020.ks").read_bytes() == plain
+
+
+class TestApplyAdlerFilterPrefixTrap:
+    """Filter ciphertext that *coincidentally* starts with a BOM or `[` must
+    still be decrypted (regression: the old fast-path skipped it and the
+    game's opening 00_000.ks stayed garbled)."""
+
+    def test_ciphertext_starting_with_bracket_is_fixed(self, tmp_path: Path):
+        plain = _make_plain()
+        # pick a key whose ciphertext starts with '[' (0x5B) AND passes the
+        # lenient heuristic (exactly what happened in the real game)
+        hits = []
+        for k in range(1, 256):
+            enc = bytes(b ^ k for b in plain)
+            if enc[:1] == b"[" and looks_like_kag_after_decode(enc):
+                hits.append(k)
+                break
+        assert hits, "no '['-prefixed heuristic-passing key found"
+        key = hits[0]
+        raw = bytes(b ^ key for b in plain)
+        adler = key
+        from types import SimpleNamespace
+
+        out = _filtered_file(tmp_path, "scenario/00_000.ks", raw, adler)
+        entries = [SimpleNamespace(path="scenario/00_000.ks", adler32=adler)]
+        fixed = _apply_xp3dec_adler_filter(out, entries)
+        assert fixed == 1
+        assert (out / "scenario" / "00_000.ks").read_bytes() == plain
+
+    def test_ciphertext_starting_with_bom_is_fixed(self, tmp_path: Path):
+        plain = _make_plain()
+        # key=1 makes the ciphertext start with the UTF-16BE BOM (0xFE 0xFF) —
+        # a "looks like a BOM'd plaintext" trap that the old fast path skipped
+        key = 1
+        raw = bytes(b ^ key for b in plain)
+        assert raw[:2] == b"\xfe\xff"
+        from types import SimpleNamespace
+
+        out = _filtered_file(tmp_path, "scenario/00_010.ks", raw, key)
+        entries = [SimpleNamespace(path="scenario/00_010.ks", adler32=key)]
+        fixed = _apply_xp3dec_adler_filter(out, entries)
+        assert fixed == 1
+        assert (out / "scenario" / "00_010.ks").read_bytes() == plain

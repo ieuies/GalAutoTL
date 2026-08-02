@@ -288,6 +288,7 @@ def _apply_xp3dec_adler_filter(
     raw bytes vs the filtered trial and keep whichever is clearly better.
     """
     from app.core.xp3_crypto import (
+        _XP3DEC_OK_QUALITY,
         filter_xor_adler_lowbyte,
         kag_text_quality,
         looks_like_kag_after_decode,
@@ -303,18 +304,22 @@ def _apply_xp3dec_adler_filter(
         if e is None:
             continue
         raw = p.read_bytes()
-        if looks_like_kag_after_decode(raw):
-            # fast path: already-good BOM'd UTF-16 or `;`/`[`-leading KAG script.
-            # Filter garbage from these titles never starts with a BOM or a
-            # KAG comment/tag line, so skipping here keeps plain games fast
-            # while still catching the mis-decoded (filtered) files below.
-            if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or raw[:1] in (b";", b"["):
+        raw_q = kag_text_quality(raw)
+        # Fast path for genuine plaintext: when the raw bytes already read as
+        # good KAG text and the primary adler-key trial is WORSE, keep raw and
+        # skip the (potentially 256-key) filter scan.  Filter garbage can
+        # coincidentally start with a BOM or `[` and still pass the lenient
+        # heuristic, so the trial comparison is what decides — cheap: one XOR +
+        # one quality decode, no full scan.
+        key = e.adler32 & 0xFF
+        if raw_q >= _XP3DEC_OK_QUALITY and key:
+            primary_trial = bytes(b ^ key for b in raw)
+            if kag_text_quality(primary_trial) < raw_q:
                 continue
         trial = filter_xor_adler_lowbyte(raw, e.adler32)
         trial_ok = looks_like_kag_after_decode(trial)
         if trial_ok and trial != raw:
-            raw_ok = looks_like_kag_after_decode(raw)
-            if not raw_ok or kag_text_quality(trial) > kag_text_quality(raw):
+            if raw_q < _XP3DEC_OK_QUALITY or kag_text_quality(trial) > raw_q:
                 p.write_bytes(trial)
                 fixed += 1
     return fixed
