@@ -177,6 +177,26 @@ def _unmask_tags(s: str, tags: List[str]) -> str:
     return out
 
 
+# punctuation that marks a value as dialogue/UI text rather than a bare name
+_NAMEPLATE_PUNCT = set("。！？…、，；：・—~「」『』“”\"'()（）")
+
+
+def _is_nameplate_value(val: str) -> bool:
+    """True when an attr value is a KAG speaker-name plate (name=/chara=).
+
+    Short, punctuation-free values are proper names (晶穗 / 俊郎 / ゆかり).
+    Sending bare names to the MT model makes it hallucinate full dialogue
+    sentences into the ``[name text=...]`` tag (breaks the in-game name box),
+    so they are kept as-is.
+    """
+    v = val.strip()
+    if not v:
+        return False
+    if len(v) > 8:
+        return False
+    return not any(c in _NAMEPLATE_PUNCT for c in v)
+
+
 def _append_attr_units(
     units: List[KsUnit],
     path: Path,
@@ -187,8 +207,22 @@ def _append_attr_units(
 ) -> None:
     for m in ATTR_RE.finditer(line):
         val = m.group("val")
+        prefix = m.group("prefix").lower()
+        # enclosing tag name ([name text="X"] / [chara name="X"]), or a direct
+        # chara="X" nameplate attribute
+        lb = line.rfind("[", 0, m.start())
+        tag = ""
+        if lb >= 0:
+            seg = line[lb + 1 : m.start()]
+            tag = seg.split(None, 1)[0].rstrip("]").lower() if seg.strip() else ""
+        is_nameplate = tag == "name" or tag.startswith("chara") or prefix.startswith("chara")
+        # KAG speaker name plates: keep short names as-is — the MT model
+        # hallucinates full dialogue sentences for bare names (breaks the
+        # in-game name box), so never translate them.
+        if is_nameplate and _is_nameplate_value(val):
+            continue
         # chara= nameplates: 俺/地 etc. must not be skipped as "already CN"
-        force = m.group("prefix").lower().startswith("chara")
+        force = prefix.startswith("chara")
         if _should_translate_body(val, source_lang, force_jp=force):
             units.append(
                 KsUnit(

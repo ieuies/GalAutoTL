@@ -73,26 +73,29 @@ def test_ks_collects_chara_askyesno_hint(tmp_path: Path):
     )
     units = collect_ks_units(root, source_lang="ja")
     sources = {u.source for u in units}
-    assert "俺" in sources
-    assert "モニカ" in sources
+    # short speaker nameplates (俺 / モニカ) are kept as-is — never sent to the
+    # MT model (it hallucinates dialogue sentences into [name]/chara= tags)
+    assert "俺" not in sources
+    assert "モニカ" not in sources
     assert "戻りますか？" in sources
     assert "本編で見ていないため、選択することが出来ません" in sources
     assert "【選択肢】" in sources
 
 
 def test_ks_apply_chara_roundtrip(tmp_path: Path):
+    # short nameplates stay untouched (kept as JP) so the name box cannot be
+    # broken by AI-hallucinated dialogue sentences
     root = tmp_path / "_galautotl_kirikiri" / "scripts"
     path = root / "scenario" / "n.ks"
     _write_ks_u16(path, '@name chara="モニカ"\n')
     units = collect_ks_units(root, source_lang="ja")
-    assert any(u.source == "モニカ" for u in units)
-    apply_ks_units(units, ["莫妮卡" if u.source == "モニカ" else u.source for u in units])
+    assert not any(u.source == "モニカ" for u in units)
+    apply_ks_units(units, [u.source for u in units])
     raw = path.read_bytes()
     text = raw.decode("utf-16-le")
     if text.startswith("\ufeff"):
         text = text[1:]
-    assert 'chara="莫妮卡"' in text
-    assert "モニカ" not in text
+    assert 'chara="モニカ"' in text
 
 
 def test_deploy_allows_scenario_macro_not_k_others():

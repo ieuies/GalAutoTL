@@ -176,12 +176,12 @@ def test_mini_e2e_kirikiri_collect_apply_stage(tmp_path: Path):
     )
     units = collect_ks_units(scripts, source_lang="ja")
     sources = [u.source for u in units]
-    assert "モニカ" in sources
+    # short nameplate (モニカ) is kept as-is; dialogue + UI strings still collect
+    assert "モニカ" not in sources
     assert "戻りますか？" in sources
     assert "選択不可です" in sources
 
     mapping = {
-        "モニカ": "莫妮卡",
         "「こんにちは」": "「你好」",
         "戻りますか？": "要返回吗？",
         "選択不可です": "无法选择",
@@ -192,9 +192,8 @@ def test_mini_e2e_kirikiri_collect_apply_stage(tmp_path: Path):
     text = (scripts / "scenario" / "a.ks").read_bytes().decode("utf-16-le")
     if text.startswith("\ufeff"):
         text = text[1:]
-    assert 'chara="莫妮卡"' in text
+    assert 'chara="モニカ"' in text
     assert "要返回吗？" in text
-    assert "モニカ" not in text
 
     patch = tmp_path / "patch_tree"
     n = stage_normalized_tree(scripts, patch)
