@@ -104,6 +104,7 @@ def extract_with_garbro(
                 text=True,
                 timeout=600,
                 cwd=str(garbro.parent),
+                stdin=subprocess.DEVNULL,  # console never prompts for a crypt scheme interactively
             )
             after = sum(1 for _ in out_dir.rglob("*") if _.is_file())
             if after > before:
@@ -196,6 +197,28 @@ def _valid_garbro_exe(p: Path) -> bool:
     return p.is_file() and p.stat().st_size >= _GARBRO_EXE_MIN_SIZE
 
 
+_CONSOLE_EXE_NAMES = {
+    "garbro-cli.exe",
+    "garbro.console.exe",
+    "gameres.console.exe",
+}
+
+
+def _is_console_name(p: Path) -> bool:
+    return p is not None and p.name.lower() in _CONSOLE_EXE_NAMES
+
+
+def _valid_garbro_console(p: Path) -> bool:
+    """A GARbro.Console.exe is a thin host (few KB); validity needs the sibling
+    official-release DLLs (ArcFormats.dll / GameRes.dll) that hold the formats.
+    A GUI exe is never a usable console, even when the DLLs sit beside it."""
+    if not _is_console_name(p):
+        return False
+    if not p.is_file() or p.stat().st_size < 5000:
+        return False
+    return (p.parent / "ArcFormats.dll").is_file() and (p.parent / "GameRes.dll").is_file()
+
+
 def _candidate_urls(url: str) -> List[str]:
     """GitHub may be slow/blocked in some regions → try common mirrors."""
     urls = [url]
@@ -242,16 +265,18 @@ def ensure_garbro(log: LogFn = None) -> Optional[Path]:
 
     Returns the Console/garbro-cli exe path, or None on failure.
     """
-    # 1) 先看本机是否已有（排除残缺的假 exe）
+    # 1) 先看本机是否已有可命令行驱动的 Console/cli（GUI 版不能静默解包）
     existing = find_garbro()
-    if existing and _valid_garbro_exe(existing):
+    if existing and _is_console_name(existing) and (
+        _valid_garbro_exe(existing) or _valid_garbro_console(existing)
+    ):
         return existing
 
     # 2) 尝试自动下载官方版
     cache = _garbro_cache_dir()
     console = cache / "GARbro.Console.exe"
     # 缓存里若有残缺假 exe，先清掉再重下
-    if console.is_file() and not _valid_garbro_exe(console):
+    if console.is_file() and not _valid_garbro_exe(console) and not _valid_garbro_console(console):
         try:
             console.unlink()
         except OSError:
@@ -281,88 +306,260 @@ def ensure_garbro(log: LogFn = None) -> Optional[Path]:
                 log(f"GARbro 自动下载失败: {e}")
             return None
 
-    if _valid_garbro_exe(console):
+    def _accept(p: Path) -> bool:
+        return _valid_garbro_exe(p) or _valid_garbro_console(p)
+
+    if _accept(console):
         if log:
-            log(f"GARbro 就绪: {console} ({console.stat().st_size // 1024} KB)")
+            log(f"GARbro 就绪: {console}")
         return console
     # 解压后可能是 garbro-cli.exe 或 GARbro.Console.exe
     for cand in ("GARbro.Console.exe", "GameRes.Console.exe", "garbro-cli.exe"):
         p = cache / cand
-        if _valid_garbro_exe(p):
+        if _accept(p):
             if log:
                 log(f"GARbro 就绪: {p}")
             return p
     # 便携版没有 Console（官方 release 只发 GUI）→ 尝试从源码编译
-    if not _valid_garbro_exe(console):
+    if not _accept(console):
         built = _build_garbro_console(cache, log)
         if built:
             return built
     return None
 
 
-def _build_garbro_console(cache: Path, log: LogFn = None) -> Optional[Path]:
-    """Compile GARbro.Console from official source when dotnet/msbuild is available.
+def _garbro_src_dir() -> Path:
+    """Local copy of the official GARbro source (for building GARbro.Console)."""
+    return Path(__file__).resolve().parents[2] / "tools" / "cache" / "garbro-src"
 
-    Official releases only ship the GUI; the console extractor exists in the
-    source tree (Console/GARbro.Console.csproj, MIT). If the user has the source
-    (e.g. Desktop/GARbro-master) and a .NET build tool, build it once so the
-    pipeline can drive `-x` extraction fully automatically.
-    """
+
+def _find_msbuild() -> Optional[str]:
+    """Locate MSBuild.exe (VS installs) for building the .NET Framework targets."""
     import shutil
 
-    # Locate source tree
-    candidates = [
+    hit = shutil.which("msbuild") or shutil.which("MSBuild.exe")
+    if hit:
+        return hit
+    for root in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft Visual Studio",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio",
+    ):
+        if not root.is_dir():
+            continue
+        for p in root.glob("*/*/MSBuild/Current/Bin/MSBuild.exe"):
+            return str(p)
+        for p in root.glob("*/*/MSBuild/*/Bin/MSBuild.exe"):
+            return str(p)
+    return None
+
+
+def _patch_net20_csproj(src: Path) -> bool:
+    """Make Net20.csproj buildable without the .NET 3.5 targeting pack.
+
+    Adds the official Microsoft.NETFramework.ReferenceAssemblies.net20 NuGet
+    package (provides v2.0 reference assemblies) and pins FrameworkPathOverride
+    to it, bypassing the "needs .NET Framework 3.5 SP1" check on modern MSBuild.
+    """
+    p = src / "Net20" / "Net20.csproj"
+    if not p.is_file():
+        return False
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if "ReferenceAssemblies.net20" in text and "<FrameworkPathOverride>" in text:
+        return True
+    fpo = (
+        Path.home()
+        / ".nuget"
+        / "packages"
+        / "microsoft.netframework.referenceassemblies.net20"
+        / "1.0.3"
+        / "build"
+        / ".NETFramework"
+        / "v2.0"
+    )
+    pkg = (
+        "  <ItemGroup>\n"
+        '    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net20" '
+        'Version="1.0.3" PrivateAssets="all" />\n'
+        "  </ItemGroup>\n"
+    )
+    if "ReferenceAssemblies.net20" not in text:
+        idx = text.find('  <Import Project="$(MSBuildToolsPath)\\Microsoft.CSharp.targets"')
+        if idx == -1:
+            idx = text.find("  <Import Project=")
+        if idx == -1:
+            return False
+        text = text[:idx] + pkg + text[idx:]
+    if "<FrameworkPathOverride>" not in text:
+        anchor = "    <TargetFrameworkProfile />\n  </PropertyGroup>"
+        add = f"    <TargetFrameworkProfile />\n    <FrameworkPathOverride>{fpo}</FrameworkPathOverride>\n  </PropertyGroup>"
+        if anchor not in text:
+            return False
+        text = text.replace(anchor, add, 1)
+    try:
+        p.write_text(text, encoding="utf-8", newline="\n")
+        return True
+    except OSError:
+        return False
+
+
+def _obtain_garbro_source(log: LogFn = None) -> Optional[Path]:
+    """Return a writable copy of the official source (Console/GARbro.Console.csproj).
+
+    Order: existing app-cache copy (garbro-src) -> copy of a local checkout
+    (Desktop/GARbro-master, never modified in place) -> download the official
+    morkt/GARbro source zip into the app cache (MIT license).
+    """
+    dest = _garbro_src_dir()
+    if (dest / "Console" / "GARbro.Console.csproj").is_file():
+        return dest
+
+    local = [
         Path.home() / "Desktop" / "GARbro-master",
         Path.home() / "Desktop" / "GARbro",
-        cache.parent / "GARbro-master",
-        cache / "GARbro-master",
     ]
-    src = None
-    for cand in candidates:
-        if (cand / "Console" / "GARbro.Console.csproj").is_file():
-            src = cand
-            break
+    for cand in local:
+        for s in (cand, cand / "GARbro-master"):
+            if (s / "Console" / "GARbro.Console.csproj").is_file():
+                if log:
+                    log("复制本机 GARbro 源码到缓存（不在原目录打补丁）…")
+                try:
+                    import shutil
+
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(s, dest, dirs_exist_ok=True)
+                    return dest
+                except OSError as e:
+                    if log:
+                        log(f"复制 GARbro 源码失败: {e}")
+                    return None
+
+    dest.mkdir(parents=True, exist_ok=True)
+    url = "https://codeload.github.com/morkt/GARbro/zip/refs/heads/master"
+    archive = dest / "GARbro-master.zip"
+    if log:
+        log("下载官方 GARbro 源码（用于编译命令行版，MIT 许可）…")
+    if not _download_with_mirrors(url, archive, log):
+        return None
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(dest)
+        for p in dest.rglob("Console/GARbro.Console.csproj"):
+            return p.parent.parent
+    except Exception as e:
+        if log:
+            log(f"GARbro 源码解压失败: {e}")
+    return None
+
+
+def _refresh_release_dlls(cache: Path, log: LogFn = None) -> bool:
+    """Ensure the cache holds a consistent official-release DLL set (ArcFormats etc.).
+
+    The console host is a thin shell; formats come from the official release
+    DLLs (GameRes/ArcFormats/Net20/...). If a *.rar is present, re-extract it to
+    refresh the DLLs (e.g. after a failed experiment polluted the cache).
+    """
+    if (cache / "ArcFormats.dll").is_file() and (cache / "GameRes.dll").is_file():
+        return True
+    rar = next(cache.glob("*.rar"), None)
+    if rar is None:
+        return False
+    return _extract_archive(rar, cache, log)
+
+
+def _build_garbro_console(cache: Path, log: LogFn = None) -> Optional[Path]:
+    """Build GARbro.Console.exe from the OFFICIAL source (morkt/GARbro, MIT).
+
+    Official releases only ship the GUI; the console extractor lives in the
+    source tree (Console/GARbro.Console.csproj).  We compile it locally with
+    MSBuild/dotnet and drop the exe next to the official release DLLs, so no
+    third-party binaries are ever downloaded.
+
+    Limitations: the console can only open archives for games present in
+    GARbro's game database (Formats.dat) — that is exactly the set of games
+    GARbro can decrypt, so it matches the "needs GARbro" use case.
+    """
+    import shutil
+    import subprocess as sp
+
+    out_console = cache / "GARbro.Console.exe"
+    if _valid_garbro_exe(out_console):
+        # quick self-check: host + official DLLs present
+        if (cache / "ArcFormats.dll").is_file() and (cache / "GameRes.dll").is_file():
+            return out_console
+    if not _refresh_release_dlls(cache, log):
+        if log:
+            log("缺少官方 GARbro 发行版 DLL（ArcFormats/GameRes），无法组装命令行版")
+        return None
+
+    src = _obtain_garbro_source(log)
     if src is None:
         if log:
-            log("未找到 GARbro 源码（Desktop/GARbro-master），无法编译 Console 版")
+            log("未找到/无法下载 GARbro 源码（需要 Desktop/GARbro-master 或联网），跳过编译")
         return None
 
-    # Prefer msbuild (best for .NET Framework 4.6), else dotnet build
-    msbuild = shutil.which("msbuild") or shutil.which("MSBuild.exe")
+    msbuild = _find_msbuild()
     dotnet = shutil.which("dotnet")
     csproj = src / "Console" / "GARbro.Console.csproj"
-    out_console = cache / "GARbro.Console.exe"
-
-    cmd = None
-    if msbuild:
-        cmd = [msbuild, str(csproj), "/p:Configuration=Release", "/p:OutputPath=" + str(cache)]
-    elif dotnet:
-        # .NET Core SDK may not build net46 without targeting pack; try anyway
-        cmd = [dotnet, "build", str(csproj), "-c", "Release", "-o", str(cache)]
-    if cmd is None:
+    if msbuild is None and dotnet is None:
         if log:
-            log("本机无 msbuild/dotnet，无法编译 GARbro.Console")
+            log("本机无 msbuild/dotnet，无法编译 GARbro.Console（可手动放 garbro-cli/GARbro.Console.exe 到工具目录）")
         return None
 
-    if log:
-        log(f"尝试从源码编译 GARbro.Console: {src.name} …")
-    try:
-        import subprocess as sp
-        r = sp.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(src))
-        if _valid_garbro_exe(out_console):
+    if msbuild:
+        if not _patch_net20_csproj(src):
             if log:
-                log(f"GARbro.Console 编译成功: {out_console} ({out_console.stat().st_size // 1024} KB)")
-            return out_console
-        # fallback: search bin output
-        for p in (src / "Console" / "bin" / "Release").rglob("GARbro.Console.exe"):
-            if _valid_garbro_exe(p):
-                shutil.copy2(p, out_console)
-                if log:
-                    log(f"GARbro.Console 就绪: {out_console}")
-                return out_console
-        if log:
-            log(f"GARbro.Console 编译失败: {r.returncode}")
+                log("Net20.csproj 补丁失败，无法编译")
+            return None
+        bld = cache / "garbro-build"
+        if bld.exists():
+            shutil.rmtree(bld, ignore_errors=True)
+        bld.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            msbuild,
+            str(csproj),
+            "/p:Configuration=Release",
+            "/p:OutputPath=" + str(bld),
+            "/p:RuntimeIdentifiers=win",
+            "/v:minimal",
+            "/nologo",
+            "/restore",
+        ]
+    else:
+        bld = cache
+        cmd = [dotnet, "build", str(csproj), "-c", "Release", "-o", str(cache)]
+    if log:
+        log(f"从官方源码编译 GARbro.Console（{src.name}）… 约 10-60 秒")
+    try:
+        r = sp.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(src))
     except Exception as e:
         if log:
             log(f"GARbro.Console 编译异常: {e}")
-    return None
+        return None
+
+    def _built_ok(p: Path) -> bool:
+        # the console host is a few-KB shell; the DLLs beside it matter
+        return p.is_file() and p.stat().st_size >= 5000
+
+    exe = bld / "GARbro.Console.exe"
+    if _built_ok(exe):
+        shutil.copy2(exe, out_console)
+    elif _built_ok(out_console):
+        pass
+    else:
+        # fallback: search bin output
+        for p in (src / "Console" / "bin" / "Release").rglob("GARbro.Console.exe"):
+            if _built_ok(p):
+                shutil.copy2(p, out_console)
+                break
+    if not _valid_garbro_console(out_console):
+        if log:
+            log(f"GARbro.Console 编译失败: {r.returncode}")
+        return None
+    if log:
+        log(f"GARbro.Console 编译成功: {out_console} ({out_console.stat().st_size // 1024} KB)")
+    return out_console
