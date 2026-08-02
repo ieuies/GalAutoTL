@@ -184,6 +184,17 @@ def _extract_scripts(
         # 内置解不开的封包才需要 GARbro；先标记，遇到失败再自动下载
         garbro = None
 
+    cxdec_scheme = None
+    try:
+        from app.core.cxdec import find_cxdec_scheme
+
+        cxdec_scheme = find_cxdec_scheme(game_dir, log)
+        if cxdec_scheme and log:
+            log("检测到 cxdec 离线方案：GARbro 解不开时将尝试内置 cxdec 解密")
+    except Exception as e:
+        if log:
+            log(f"cxdec 方案加载跳过: {e}")
+
     for arc in targets:
         name_l = arc.name.lower()
         # 跳过汉化产物封包：patch*.xp3 与 unencrypted.xp3（后者是 version.dll
@@ -230,6 +241,34 @@ def _extract_scripts(
                 if list(scripts.rglob("*.ks")):
                     extracted_any = True
                     continue
+        if cxdec_scheme:
+            sub = work / "_cxdec" / arc.stem
+            if sub.exists():
+                shutil.rmtree(sub)
+            try:
+                from app.core.cxdec import extract_xp3_cxdec
+
+                n = extract_xp3_cxdec(
+                    arc,
+                    sub,
+                    cxdec_scheme,
+                    only_suffixes={".ks", ".tjs", ".csv", ".txt"},
+                    log=log,
+                )
+                if n:
+                    for p in sub.rglob("*.ks"):
+                        if not p.is_file():
+                            continue
+                        rel = normalize_kag_relpath(p.relative_to(sub))
+                        dest = scripts / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(p, dest)
+                    if list(scripts.rglob("*.ks")):
+                        extracted_any = True
+                        continue
+            except Exception as e:
+                if log:
+                    log(f"  cxdec 离线解密失败: {e}")
         enc_fail.append(arc.name)
 
     _postprocess_scripts(scripts, log)
@@ -256,24 +295,25 @@ def _extract_scripts(
         if log:
             log(
                 f"剧本内容层仅明文 {n_plain}/{n_total}（其余为 cxdec 密文乱码），"
-                "需要 GARbro 解内容层…"
+                "需要解密内容层——"
+                + ("离线 cxdec" if cxdec_scheme else "GARbro")
+                + "…"
             )
-        from app.core.garbro_cli import ensure_garbro
+        # 1) 有离线方案先用离线 cxdec（免下载、免 GARbro）
+        if cxdec_scheme:
+            from app.core.cxdec import extract_xp3_cxdec
 
-        garbro = ensure_garbro(log)
-        if garbro:
-            if log:
-                log(f"用 GARbro 重解 data.xp3 内容层: {garbro}")
-            # 用 GARbro 解所有封包，覆盖明文剧本
             for arc in find_xp3_archives(game_dir):
                 name_l = arc.name.lower()
                 if "patch" in name_l or "unencrypted" in name_l:
                     continue
-                sub = work / "_garbro_full" / arc.stem
+                sub = work / "_cxdec_full" / arc.stem
                 if sub.exists():
                     shutil.rmtree(sub)
-                ok = extract_with_garbro(arc, sub, garbro, log)
-                if ok:
+                try:
+                    extract_xp3_cxdec(
+                        arc, sub, cxdec_scheme, only_suffixes={".ks", ".tjs", ".csv", ".txt"}, log=log
+                    )
                     for p in sub.rglob("*.ks"):
                         if not p.is_file():
                             continue
@@ -281,9 +321,41 @@ def _extract_scripts(
                         dest = scripts / rel
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(p, dest)
+                except Exception as e:
+                    if log:
+                        log(f"  cxdec 全量重解 {arc.name} 失败: {e}")
             n_plain2, n_total2 = count_plain_ks(scripts)
             if log:
-                log(f"GARbro 重解后明文: {n_plain2}/{n_total2}")
+                log(f"cxdec 重解后明文: {n_plain2}/{n_total2}")
+            n_plain, n_total = n_plain2, n_total2
+        # 2) 仍不足再交给 GARbro（有每游戏方案库，最权威）
+        if n_plain < n_total:
+            from app.core.garbro_cli import ensure_garbro
+
+            garbro = ensure_garbro(log)
+            if garbro:
+                if log:
+                    log(f"用 GARbro 重解 data.xp3 内容层: {garbro}")
+                # 用 GARbro 解所有封包，覆盖明文剧本
+                for arc in find_xp3_archives(game_dir):
+                    name_l = arc.name.lower()
+                    if "patch" in name_l or "unencrypted" in name_l:
+                        continue
+                    sub = work / "_garbro_full" / arc.stem
+                    if sub.exists():
+                        shutil.rmtree(sub)
+                    ok = extract_with_garbro(arc, sub, garbro, log)
+                    if ok:
+                        for p in sub.rglob("*.ks"):
+                            if not p.is_file():
+                                continue
+                            rel = normalize_kag_relpath(p.relative_to(sub))
+                            dest = scripts / rel
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(p, dest)
+                n_plain2, n_total2 = count_plain_ks(scripts)
+                if log:
+                    log(f"GARbro 重解后明文: {n_plain2}/{n_total2}")
 
     n_plain, n_total = count_plain_ks(scripts)
     if n_plain == 0:

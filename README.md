@@ -39,7 +39,7 @@ py -3 -m pytest tests -q
 
 | 引擎 | 管线 | 一键程度 | 编码 | 二次全量 | 仅译漏句 | 主要限制 |
 |------|------|----------|------|----------|----------|----------|
-| Kirikiri / XP3 | `kirikiri` | 高 | UTF-16 | 原包/备份+缓存 | ✓ | cxdec 需 garbro / unencrypted |
+| Kirikiri / XP3 | `kirikiri` | 高 | UTF-16 | 原包/备份+缓存 | ✓ | cxdec 需 garbro / unencrypted / 离线方案 |
 | SoftPal | `softpal` | 高 | zh→GBK | PAC/备份+缓存 | ✓ | 非经典 SoftPal 另论 |
 | Kagura | `kagura` | 高 | CP932 | 备份 pak | ✓ | 槽位截断 / `・` |
 | Artemis | `artemis` | 高 | UTF-8 | PFS 日文源 | ✓ | `.asb` 弱 |
@@ -125,7 +125,11 @@ build_exe.bat
 
 - 多数现代 Kirikiri 为 **UTF-16**，不做 CP932 夹紧  
 - 解包已尽量自动化：明文 XP3 → 常见 XOR（Neko 系）→ `FE FE` 脚本还原 → 若本机有 **garbro-cli**（PATH / 工具目录 / 环境变量 `GARBRO`）则自动调用  
-- 仍无法解的厂商 **cxdec** 专用密钥：请安装 garbro-cli，或手动解出 `.ks` 填到「文本文件夹」  
+- 仍无法解的厂商 **cxdec** 专用密钥：请安装 garbro-cli，或手动解出 `.ks` 填到「文本文件夹」
+- **cxdec 离线解密（内置）**：把每游戏方案写成 `游戏目录\GalAutoTL_cxdec.json`（或 `%APPDATA%\GalAutoTL\cxdec_schemes.json` 多游戏表），
+  `mask / offset / prolog_order / odd_branch_order / even_branch_order` 从游戏 exe/tpm 静态分析得到（参考
+  [FindCxdecKey 指南](https://github.com/yuugiri-ky/GalgameCoding/blob/main/Kirikiri/HowToFindCxEncryptKey/FindCxdecKey_CN.md)），
+  控制块（`tpm` 字段或自动扫描 `*.tpm`/`*.exe`）自动提取；之后即可离线解包、无需 GARbro。格式示例见 `app/core/cxdec.py` 头注释。  
 - 工作目录：`游戏目录\_galautotl_kirikiri\`
 
 ### YU-RIS（`.ypf` / `.ybn`）— 一键注入

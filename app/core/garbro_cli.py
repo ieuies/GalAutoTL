@@ -14,6 +14,7 @@ CANDIDATE_NAMES = (
     "garbro-cli.exe",
     "GARbro.Console.exe",
     "GameRes.Console.exe",
+    "GARbro.GUI.exe",  # 官方便携版只有 GUI；认它避免重复下载
     "garbro.exe",
     "GARbro.exe",
 )
@@ -84,11 +85,14 @@ def extract_with_garbro(
         attempts.append([str(garbro), "-x", str(archive), str(out_dir)])
         attempts.append([str(garbro), str(archive), str(out_dir)])
     else:
-        # GUI — 有些构建支持把目标路径作为参数打开；尝试提取类参数，
-        # 失败则明确提示（不能静默解包）
-        attempts.append([str(garbro), str(archive)])
+        # GUI 版无法静默解包——不要尝试启动（会弹窗且解不出来）。
+        # 需要 garbro-cli / GARbro.Console 才能命令行解包。
         if log:
-            log(f"找到 GARbro GUI（{garbro.name}），尝试命令行打开；若无法静默解包请改用 Console 版")
+            log(
+                f"GARbro 为 GUI 版（{garbro.name}），无法静默解包；"
+                "已跳过。需要命令行版（garbro-cli / GARbro.Console）才能自动解包。"
+            )
+        return False
 
     for cmd in attempts:
         try:
@@ -252,7 +256,9 @@ def ensure_garbro(log: LogFn = None) -> Optional[Path]:
             console.unlink()
         except OSError:
             pass
-    if not _valid_garbro_exe(console):
+    # 缓存里已有 GARbro（GUI 或任何 exe）→ 不再重复下载 rar
+    already = any(cache.glob("*.exe")) if cache.is_dir() else False
+    if not _valid_garbro_exe(console) and not already:
         try:
             if log:
                 log("未找到 GARbro，尝试自动下载官方版 …")

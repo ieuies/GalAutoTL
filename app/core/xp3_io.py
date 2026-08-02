@@ -215,6 +215,12 @@ def _extract_entry(f: BinaryIO, entry: XP3Entry) -> bytes:
     return b"".join(parts)
 
 
+def read_xp3_entry(archive: Path | str, entry: XP3Entry) -> bytes:
+    """Read + decompress a single entry's body from ``archive``."""
+    with Path(archive).open("rb") as f:
+        return _extract_entry(f, entry)
+
+
 def extract_xp3(
     archive: Path | str,
     out_dir: Path | str,
