@@ -279,11 +279,18 @@ def extract_xp3(
 def _apply_xp3dec_adler_filter(
     out_dir: Path, entries: List[XP3Entry]
 ) -> int:
-    """Post-extract: XOR ciphertext with (adler&0xFF) when needed. Returns files fixed."""
+    """Post-extract: XOR ciphertext with (adler&0xFF) when needed. Returns files fixed.
+
+    Some packs (e.g. xp3dec.tpm titles) filter every script but leave the XP3
+    ENC bit clear, so the filter must also run on files whose raw bytes happen
+    to pass ``looks_like_kag_after_decode`` (filter garbage often decodes to
+    mojibake that still contains kana/``[``).  We compare text quality of the
+    raw bytes vs the filtered trial and keep whichever is clearly better.
+    """
     from app.core.xp3_crypto import (
         filter_xor_adler_lowbyte,
+        kag_text_quality,
         looks_like_kag_after_decode,
-        looks_like_text,
     )
 
     by_path = {e.path.replace("\\", "/"): e for e in entries}
@@ -297,14 +304,19 @@ def _apply_xp3dec_adler_filter(
             continue
         raw = p.read_bytes()
         if looks_like_kag_after_decode(raw):
-            continue
-        if looks_like_text(raw) and not raw.startswith((b"\xda`G", b"\xda\x60\x47")):
-            # may still be filter-xor'd without magic — try anyway if adler key helps
-            pass
+            # fast path: already-good BOM'd UTF-16 or `;`/`[`-leading KAG script.
+            # Filter garbage from these titles never starts with a BOM or a
+            # KAG comment/tag line, so skipping here keeps plain games fast
+            # while still catching the mis-decoded (filtered) files below.
+            if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or raw[:1] in (b";", b"["):
+                continue
         trial = filter_xor_adler_lowbyte(raw, e.adler32)
-        if looks_like_kag_after_decode(trial):
-            p.write_bytes(trial)
-            fixed += 1
+        trial_ok = looks_like_kag_after_decode(trial)
+        if trial_ok and trial != raw:
+            raw_ok = looks_like_kag_after_decode(raw)
+            if not raw_ok or kag_text_quality(trial) > kag_text_quality(raw):
+                p.write_bytes(trial)
+                fixed += 1
     return fixed
 
 

@@ -34,6 +34,10 @@ def xor_decrypt(data: bytes, adler32: int, scheme: str) -> bytes:
     return bytes(buf)
 
 
+# minimum kag_text_quality a trial must reach to be trusted as the filter key
+_XP3DEC_OK_QUALITY = 40
+
+
 def filter_xor_adler_lowbyte(data: bytes, adler32: int) -> bytes:
     """xp3dec.tpm-style filter: XOR every byte with (FileHash & 0xFF).
 
@@ -41,38 +45,62 @@ def filter_xor_adler_lowbyte(data: bytes, adler32: int) -> bytes:
     FileHash is the XP3 adlr field of the *plaintext* (pre-filter) stream.
     Falls back to scanning other XOR keys when the adlr low byte does not
     yield readable KAG (needed for a minority of files in some packs).
+
+    Scoring uses :func:`kag_text_quality` (UTF-16 BOM aware), so UTF-16LE
+    KAG scripts decrypt via the primary key instead of being rejected by a
+    cp932-only heuristic.
     """
-    def score(trial: bytes) -> int:
-        try:
-            text = trial.decode("cp932")
-        except UnicodeDecodeError:
-            return -1
-        nl = text.count("\n")
-        if nl < 5 and len(trial) > 200:
-            return -1
-        kana = sum(1 for c in text[:3000] if "\u3040" <= c <= "\u30ff")
-        tags = text.count("[tp]") + text.count("[haikei") + text.count("※")
-        return nl + kana * 2 + tags * 15
-
     primary = adler32 & 0xFF
-    if primary:
-        trial = bytes(b ^ primary for b in data)
-        if score(trial) >= 80:
-            return trial
+    trial = bytes(b ^ primary for b in data) if primary else data
+    if primary and kag_text_quality(trial) >= _XP3DEC_OK_QUALITY:
+        return trial
 
-    best_b = trial if primary else data
-    best_s = score(best_b) if primary else -1
+    best_b = trial
+    best_s = kag_text_quality(best_b)
     for k in range(256):
         if k == primary:
             continue
         trial = bytes(b ^ k for b in data)
-        sc = score(trial)
+        sc = kag_text_quality(trial)
         if sc > best_s:
             best_s = sc
             best_b = trial
-            if sc >= 120:
+            if sc >= _XP3DEC_OK_QUALITY:
                 break
     return best_b
+
+
+def kag_text_quality(data: bytes) -> int:
+    """Score how much ``data`` resembles real KAG script text (higher = better).
+
+    Used by the xp3dec adlr filter to prefer a filtered trial over raw bytes
+    when BOTH pass the lenient ``looks_like_kag_after_decode`` heuristic.
+    Filter garbage sometimes decodes (as cp932/UTF-16 mojibake) into text that
+    still contains kana / ``[`` tags and thereby passes the heuristic, so the
+    quality score breaks the tie: real KAG scripts decode cleanly (few U+FFFD),
+    are line-oriented, and usually open with a ``;``-comment / ``[``-tag line.
+    """
+    if not data or not looks_like_text(data):
+        return -1
+    if data[:2] == b"\xff\xfe":
+        text = data[2:8000].decode("utf-16-le", errors="replace")
+    elif data[:2] == b"\xfe\xff":
+        text = data[2:8000].decode("utf-16-be", errors="replace")
+    else:
+        chunk = data[:8000]
+        try:
+            text = chunk.decode("cp932")
+        except UnicodeDecodeError:
+            try:
+                text = chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                text = chunk.decode("cp932", errors="replace")
+    fffd = text.count("\ufffd")
+    nl = text.count("\n")
+    kana = sum(1 for c in text if "\u3040" <= c <= "\u30ff")
+    cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    header = 12 if data[:4] == b"\xff\xfe;\x00" else (6 if data[:1] in (b";", b"[") else 0)
+    return header + nl * 3 + kana * 2 + cjk - fffd * 5
 
 
 def looks_like_text(data: bytes) -> bool:
